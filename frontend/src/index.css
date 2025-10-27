@@ -1,0 +1,4 @@
+/* Minimal styles */
+html,body,#root { height:100%; margin:0; }
+a { color: #0b5fff; text-decoration: none; }
+a:hover { text-decoration: underline; }
