@@ -13,13 +13,25 @@ export const lightTheme = {
   nodeBg: "#e3f2fd",
   edgeColor: "#000000",
   cardBg: "#ffffff",
+  surface: "#ffffff",
   inputBg: "#ffffff",
   inputText: "#212529",
-  placeholderText : "#212529",
+  subtleText: "#6b7280",
+  placeholderText: "#212529",
   buttonBg: "#ffffff",
   buttonText: "#212529",
   hoverBg: "#e9ecef",
+
+  // 🔵 Added for better UI consistency
+  primary: "#4f46e5",
+  accent: "#6366f1",
+  link: "#4f8cff",
+  error: "#ff4d4d",
+  googleBtnBg: "#ffffff",
+  googleBtnText: "#333333",
+  shadow: "rgba(0, 0, 0, 0.15)",
 };
+
 
 export const darkTheme = {
   background: "#121212",
@@ -31,13 +43,25 @@ export const darkTheme = {
   nodeBg: "#2b2b2b",
   edgeColor: "#ffffff",
   cardBg: "#2c2c2c",
+  surface: "#2b2b3d",
   inputBg: "#2c2c2c",
   inputText: "#ffffff",
-  placeholderText : "#ffffff",
+  subtleText: "#94a3b8",
+  placeholderText: "#ffffff",
   buttonBg: "#2c2c2c",
   buttonText: "#ffffff",
   hoverBg: "#3a3a3a",
+
+  // 🟣 Added theme-aware properties for login and UI cards
+  primary: "#6366f1",
+  accent: "#818cf8",
+  link: "#4f8cff",
+  error: "#ff6b6b",
+  googleBtnBg: "#3a3a4f",
+  googleBtnText: "#f5f5f5",
+  shadow: "rgba(0, 0, 0, 0.4)",
 };
+
 
 // --- Theme Context ---
 const ThemeContext = createContext();
