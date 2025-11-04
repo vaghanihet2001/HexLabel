@@ -1,4 +1,4 @@
-// src/pages/Projects.jsx
+// frontend/src/pages/Projects.jsx
 import React, { useEffect, useState } from "react";
 import {
   Card,
@@ -163,7 +163,7 @@ export default function Projects() {
   const cardStyle = {
     backgroundColor: themeColors.cardBg,
     color: themeColors.text,
-    border: `1px solid ${themeColors.border}`,
+    border: `2px solid ${themeColors.border}`,
     borderRadius: "12px",
     boxShadow: "0 4px 10px rgba(0,0,0,0.05)",
   };
@@ -290,13 +290,13 @@ export default function Projects() {
       </Row>
 
       {/* Add/Edit Modal */}
-      <Modal show={showEdit} onHide={() => setShowEdit(false)} centered>
-        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg }}>
+      <Modal show={showEdit} onHide={() => setShowEdit(false)} centered >
+        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
           <Modal.Title>
             {currentProject?.id ? "Edit Project" : "Add Project"}
           </Modal.Title>
         </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.background }}>
+        <Modal.Body style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
           <Form onSubmit={handleSaveProject}>
             <Form.Group className="mb-3">
               <Form.Label>Project Name</Form.Label>
@@ -365,14 +365,14 @@ export default function Projects() {
 
       {/* Delete Modal */}
       <Modal show={showDelete} onHide={() => setShowDelete(false)} centered>
-        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg }}>
+        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
           <Modal.Title>Confirm Deletion</Modal.Title>
         </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.background }}>
-          Are you sure you want to delete{" "}
+        <Modal.Body style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
+          Are you sure you want to delete Project : {" "}
           <strong>{currentProject?.name}</strong>?
         </Modal.Body>
-        <Modal.Footer style={{ backgroundColor: themeColors.cardBg }}>
+        <Modal.Footer style={{ backgroundColor: themeColors.cardBg,color: themeColors.text,bordercolor: themeColors.border}}>
           <Button variant="secondary" onClick={() => setShowDelete(false)}>
             Cancel
           </Button>

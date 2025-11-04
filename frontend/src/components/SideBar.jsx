@@ -1,3 +1,4 @@
+// frontend/src/components/SideBar.jsx
 import React, { useState } from "react";
 import { Nav, Button, OverlayTrigger, Tooltip } from "react-bootstrap";
 import { Link, useLocation } from "react-router-dom";
@@ -127,7 +128,7 @@ export default function Sidebar() {
           marginBottom: "8px",
         }}
       >
-        {!collapsed && `© ${new Date().getFullYear()} Hex Ecosystem`}
+        {!collapsed && `© ${new Date().getFullYear()} HexVerce App`}
       </div>
     </div>
   );

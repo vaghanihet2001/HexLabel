@@ -1,3 +1,4 @@
+// frontend/src/pages/Dashboard.jsx
 import React from "react";
 import { Card, Row, Col, ProgressBar, ListGroup } from "react-bootstrap";
 import { useTheme } from "../components/ThemeContext";

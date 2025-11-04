@@ -1,3 +1,4 @@
+// frontend/src/components/Header.jsx
 import React, { useState } from "react";
 import {
   FaGithub,
@@ -11,6 +12,7 @@ import {
 import "bootstrap/dist/css/bootstrap.min.css";
 import { useTheme } from "./ThemeContext";
 import { useAuth } from "../auth/AuthContext";
+import logo from "../assets/logo-removebg.png";
 
 const HEADER_HEIGHT = 60;
 
@@ -54,7 +56,7 @@ const Header = () => {
       {/* Logo */}
       <div className="d-flex align-items-center gap-2">
         <img
-          src="src/assets/logo-removebg.png"
+          src={logo}
           alt="HEX Logo"
           className="img-fluid"
           style={{ height: "40px" }}

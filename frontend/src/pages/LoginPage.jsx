@@ -1,3 +1,4 @@
+// frontend/src/pages/LoginPage.jsx
 import React, { useState } from "react";
 import { FaGoogle } from "react-icons/fa";
 import { useAuth } from "../auth/AuthContext";

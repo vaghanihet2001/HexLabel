@@ -1,4 +1,4 @@
-// src/theme/ThemeContext.jsx
+// src/components/ThemeContext.jsx
 import React, { createContext, useState, useContext, useEffect } from "react";
 import { Placeholder } from "react-bootstrap";
 

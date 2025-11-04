@@ -1,3 +1,4 @@
+// frontend/src/pages/LabelEditor.jsx
 import React, { useRef, useState } from 'react'
 import { Stage, Layer, Rect, Image as KImage } from 'react-konva'
 import useImage from "use-image";
