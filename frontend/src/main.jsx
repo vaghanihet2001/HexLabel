@@ -11,6 +11,20 @@ import LoginPage from "./pages/LoginPage";
 function AppWithAuth() {
   const { user, loading } = useAuth();
 
+  // Disable zooming (Ctrl + / Ctrl - / wheel + Ctrl)
+  window.addEventListener("wheel", function (e) {
+    if (e.ctrlKey) {
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  window.addEventListener("keydown", function (e) {
+    // Disable Ctrl + '+', Ctrl + '-', Ctrl + '0'
+    if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '0')) {
+      e.preventDefault();
+    }
+});
+
   if (loading) {
     return (
       <div

@@ -10,6 +10,7 @@ import {
   PenTool,
   ChevronLeft,
   ChevronRight,
+  Settings,
 } from "lucide-react";
 
 export default function Sidebar() {
@@ -21,7 +22,7 @@ export default function Sidebar() {
     { path: "/", label: "Dashboard", icon: <Layers size={18} /> },
     { path: "/projects", label: "Projects", icon: <Folder size={18} /> },
     { path: "/annotate", label: "Annotate", icon: <PenTool size={18} /> },
-    { path: "/datasets", label: "Datasets", icon: <Database size={18} /> },
+    { path: "/settings", label: "Settings", icon: <Settings size={18} /> },
   ];
 
   return (

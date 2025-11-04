@@ -4,7 +4,6 @@ import React, {
   useState,
   useRef,
   useCallback,
-  useMemo,
 } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
@@ -34,14 +33,11 @@ import { useTheme } from "../components/ThemeContext";
 
 // Utility to generate color for class
 const colorForLabel = (label) => {
-  // deterministic-ish color from label string
   let h = 0;
   for (let i = 0; i < label.length; i++) h = (h << 5) - h + label.charCodeAt(i);
   const hue = Math.abs(h) % 360;
   return `hsl(${hue} 70% 50%)`;
 };
-
-// Unique id generator (simple)
 const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 9);
 
 export default function Annotate() {
@@ -57,26 +53,42 @@ export default function Annotate() {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  // UI / tool state
   const [tool, setTool] = useState("bbox"); // 'bbox' | 'poly'
   const [crosshair, setCrosshair] = useState(true);
   const [zoom, setZoom] = useState(1);
-  const [annotations, setAnnotations] = useState([]); // current image annotations
-  const [classes, setClasses] = useState([]); // [{name,color,id}]
+  const [annotations, setAnnotations] = useState([]); // loaded for current image
+  const [classes, setClasses] = useState([]); // [{id,name,color}]
   const [newClassName, setNewClassName] = useState("");
   const [selectedAnnId, setSelectedAnnId] = useState(null);
 
+  // refs
   const imageRef = useRef(null);
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const createdUrlsRef = useRef(new Set());
   const autosaveTimer = useRef(null);
-  const drawingState = useRef({
-    inProgress: false,
-    start: null, // [x,y] normalized
-    currentPoly: [], // array of normalized [x,y]
+
+
+  // drawing/edit state (mutable ref to avoid re-render loops)
+  const stateRef = useRef({
+    mode: null, // 'drawing' | 'editing' | null
+    draw: {
+      inProgress: false,
+      start: null, // normalized [x,y]
+      current: null, // normalized [x,y]
+      currentPoly: [], // normalized [x,y,...]
+    },
+    edit: {
+      annId: null,
+      type: null, // 'move' | 'corner' | 'vertex'
+      index: null, // index for corner/vertex
+      offset: null, // client offset during move
+    },
+    mouse: { cx: 0, cy: 0 }, // client coords
   });
 
-  // Ensure folder permission helper
+  // helpers: ensure folder permission (same as before)
   async function ensureFolderAccess(handle) {
     try {
       if (!handle) return false;
@@ -90,13 +102,12 @@ export default function Annotate() {
     }
   }
 
-  // ---- Load dataset, job, images on mount or params change ----
+  // --------------------- LOAD: dataset, job, images, classes ---------------------
   useEffect(() => {
     let mounted = true;
     setLoading(true);
     (async () => {
       try {
-        console.log("Loading project/dataset/job...");
         const [proj, ds, jb] = await Promise.all([
           db.projects.get(Number(projectId)),
           db.datasets.get(dsId),
@@ -111,22 +122,19 @@ export default function Annotate() {
         setDataset(ds);
         setJob(jb || null);
 
-        // compute classes from DB (if you have classes store later - for now derive from annotations)
-        // load images that are part of job
+        // load images
         const jobImageIds = jb?.imageIds ?? [];
         const imgs =
           jobImageIds.length > 0
             ? await db.images.where("id").anyOf(jobImageIds).toArray()
             : await db.images.where("datasetId").equals(dsId).toArray();
 
-        // Build preview URLs (try folderHandle/raw_images/<name>, fallback img.url or img.file)
         const resolved = [];
         for (const img of imgs) {
           let url = null;
           try {
             if (ds.folderHandle) {
               try {
-                // try to open raw_images subfolder (this is where uploads were saved)
                 const rawDir = await ds.folderHandle.getDirectoryHandle("raw_images", {
                   create: false,
                 });
@@ -135,18 +143,14 @@ export default function Annotate() {
                 url = URL.createObjectURL(file);
                 createdUrlsRef.current.add(url);
               } catch (err) {
-                // not found in raw_images or permission issue -> fallback
-                // console.warn("raw_images lookup failed for", img.name, err);
+                /* fallback */
               }
             }
             if (!url && img.file instanceof Blob) {
               url = URL.createObjectURL(img.file);
               createdUrlsRef.current.add(url);
             }
-            if (!url && img.url) {
-              // if it's a relative/absolute path, try to use it as-is (web app hosted contexts may block file://)
-              url = img.url;
-            }
+            if (!url && img.url) url = img.url;
           } catch (e) {
             console.warn("Failed to create url for image", img.name, e);
           }
@@ -157,7 +161,7 @@ export default function Annotate() {
         setImages(resolved);
         setCurrentIdx(0);
 
-        // derive classes from existing annotations in DB (unique className across dataset)
+        // derive classes from all annotations in DB for this dataset
         const allAnn = await db.annotations.where("datasetId").equals(dsId).toArray();
         const labels = new Map();
         for (const r of allAnn) {
@@ -167,7 +171,6 @@ export default function Annotate() {
             if (!labels.has(name)) labels.set(name, colorForLabel(name));
           }
         }
-        // initial classes
         setClasses(Array.from(labels.entries()).map(([name, color]) => ({ id: uid(), name, color })));
       } catch (err) {
         console.error("Load failed:", err);
@@ -175,19 +178,19 @@ export default function Annotate() {
         if (mounted) setLoading(false);
       }
     })();
+
     return () => {
-      mounted = false;
-      // revoke created urls
       createdUrlsRef.current.forEach((u) => {
         try {
           URL.revokeObjectURL(u);
         } catch {}
       });
       createdUrlsRef.current.clear();
+      mounted = false;
     };
   }, [projectId, datasetId, jobId]);
 
-  // ---- Load annotations when image or dataset changes ----
+  // --------------------- LOAD annotations for current image ---------------------
   useEffect(() => {
     const loadForImage = async () => {
       const img = images[currentIdx];
@@ -200,13 +203,14 @@ export default function Annotate() {
           .where({ datasetId: dsId, imageName: img.name })
           .first();
         const data = rec?.data ?? [];
-        // ensure each annotation has id & color
+        // normalize annotations, add visible flag
         const normalized = data.map((a) => ({
           id: a.id ?? uid(),
           type: a.type,
           points: a.points,
           className: a.className || "class",
           color: a.color || colorForLabel(a.className || "class"),
+          visible: a.visible === false ? false : true,
         }));
         setAnnotations(normalized);
         setSelectedAnnId(null);
@@ -218,7 +222,8 @@ export default function Annotate() {
     loadForImage();
   }, [images, currentIdx, dsId]);
 
-  // ---- Autosave annotations (debounced) ----
+
+  // --------------------- AUTOSAVE (debounced) ---------------------
   const scheduleSave = useCallback(() => {
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(async () => {
@@ -236,7 +241,7 @@ export default function Annotate() {
           .first();
         if (existing) await db.annotations.update(existing.id, payload);
         else await db.annotations.add(payload);
-        // console.log("Annotations autosaved");
+        //console.log("autosaved");
       } catch (err) {
         console.error("Failed autosave:", err);
       }
@@ -250,7 +255,7 @@ export default function Annotate() {
     };
   }, [annotations, scheduleSave]);
 
-  // ---- Helpers to map mouse coords to normalized image coords (0..1) ----
+  // --------------------- Coordinate helpers ---------------------
   const imageClientRect = () => {
     const imgEl = imageRef.current;
     if (!imgEl) return null;
@@ -261,7 +266,6 @@ export default function Annotate() {
     if (!rect) return null;
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
-    // clamp
     return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
   };
   const normalizedToClient = (nx, ny) => {
@@ -270,254 +274,550 @@ export default function Annotate() {
     return [rect.left + nx * rect.width, rect.top + ny * rect.height];
   };
 
-  // ---- Drawing logic ----
+  // --------------------- Drawing & render overlay ---------------------
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
     const ctx = canvas.getContext("2d");
 
-    const resizeCanvas = () => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
+    function resizeCanvas() {
+      const rect = container.getBoundingClientRect();
       canvas.width = rect.width;
       canvas.height = rect.height;
-    };
+    }
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
 
-    const render = () => {
-      // clear
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // helper: convert normalized to canvas-local coords (canvas origin = container top-left)
+    const normToCanvas = (nx, ny) => {
+      const rect = imageClientRect();
+      if (!rect) return null;
+      const cx = (rect.left - container.getBoundingClientRect().left) + nx * rect.width;
+      const cy = (rect.top - container.getBoundingClientRect().top) + ny * rect.height;
+      return [cx, cy];
+    };
 
-      // draw existing annotations overlay (scale normalized to image rect)
+    const draw = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       const rect = imageClientRect();
       if (!rect) return;
 
       ctx.save();
-      // draw poly/bbox with colors
+
+      // draw existing annotations
       for (const a of annotations) {
-        ctx.strokeStyle = a.color || colorForLabel(a.className || "class");
-        ctx.fillStyle = a.color ? hexToRgba(a.color, 0.12) : hexToRgba("#000000", 0.08);
+        if (a.visible === false) continue;
+        const stroke = a.color || colorForLabel(a.className || "class");
+        // fill with 30% opacity
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = a.id === selectedAnnId ? 3 : 2;
+        // ctx.fillStyle = stroke.startsWith("hsl") ? stroke.replace("hsl(", "hsla(").replace(")", ", 0.32)") : hexToRgba(stroke, 0.05);
+        ctx.fillStyle = "rgba(255,255,255,0.30)";
 
         if (a.type === "bbox") {
-          // points: [x1,y1,x2,y2] normalized
           const [x1, y1, x2, y2] = a.points;
-          const cx = rect.left + x1 * rect.width;
-          const cy = rect.top + y1 * rect.height;
-          const cw = (x2 - x1) * rect.width;
-          const ch = (y2 - y1) * rect.height;
-          ctx.strokeRect(cx - rect.left, cy - rect.top, cw, ch);
-          ctx.fillRect(cx - rect.left, cy - rect.top, cw, ch);
+          const [cx, cy] = normToCanvas(x1, y1);
+          const w = (x2 - x1) * rect.width;
+          const h = (y2 - y1) * rect.height;
+          ctx.beginPath();
+          ctx.rect(cx, cy, w, h);
+          ctx.fill();
+          ctx.stroke();
+          // draw corner handles (white dot inside colored ring)
+          const corners = [
+            [x1, y1],
+            [x2, y1],
+            [x2, y2],
+            [x1, y2],
+          ];
+          corners.forEach((c) => {
+            const [hx, hy] = normToCanvas(c[0], c[1]);
+            drawHandle(ctx, hx, hy, stroke);
+          });
+          // white center dot
+          // const centerX = cx + w / 2;
+          // const centerY = cy + h / 2;
+          // drawCenterDot(ctx, centerX, centerY);
         } else if (a.type === "poly") {
-          const pts = a.points; // [x,y,x,y,...]
+          const pts = a.points;
+          if (pts.length < 6) continue;
           ctx.beginPath();
           for (let i = 0; i < pts.length; i += 2) {
-            const px = rect.left + pts[i] * rect.width - rect.left;
-            const py = rect.top + pts[i + 1] * rect.height - rect.top;
+            const [px, py] = normToCanvas(pts[i], pts[i + 1]);
             if (i === 0) ctx.moveTo(px, py);
             else ctx.lineTo(px, py);
           }
           ctx.closePath();
-          ctx.stroke();
           ctx.fill();
-        }
-      }
-
-      // draw in-progress shape
-      const d = drawingState.current;
-      if (d.inProgress) {
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 2;
-        if (d.mode === "bbox" && d.start && d.current) {
-          const [sx, sy] = d.start;
-          const [cxn, cyn] = d.current;
-          const x = Math.min(sx, cxn);
-          const y = Math.min(sy, cyn);
-          const w = Math.abs(cxn - sx);
-          const h = Math.abs(cyn - sy);
-          ctx.strokeRect(
-            rect.left + x * rect.width - rect.left,
-            rect.top + y * rect.height - rect.top,
-            w * rect.width,
-            h * rect.height
-          );
-        } else if (d.mode === "poly" && d.currentPoly.length) {
-          const pts = d.currentPoly;
-          ctx.beginPath();
+          ctx.stroke();
+          // vertex handles
           for (let i = 0; i < pts.length; i += 2) {
-            const px = rect.left + pts[i] * rect.width - rect.left;
-            const py = rect.top + pts[i + 1] * rect.height - rect.top;
-            if (i === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
+            const [vx, vy] = normToCanvas(pts[i], pts[i + 1]);
+            drawHandle(ctx, vx, vy, stroke);
           }
-          // current mouse as last point (if exists)
-          if (d.current) {
-            const [mx, my] = d.current;
-            ctx.lineTo(rect.left + mx * rect.width - rect.left, rect.top + my * rect.height - rect.top);
-          }
-          ctx.stroke();
+          // center dot (compute polygon centroid approx)
+          // const centroid = polygonCentroid(pts, rect);
+          // if (centroid) {
+          //   drawCenterDot(ctx, centroid[0], centroid[1]);
+          // }
         }
       }
 
-      // crosshair
+      // draw in-progress (live) shapes
+      const d = stateRef.current.draw;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#fff";
+      ctx.fillStyle = "rgba(255,255,255,0.30)";
+      if (d.inProgress) {
+        if (stateRef.current.draw.mode === "bbox" || (stateRef.current.draw.mode == null && tool === "bbox")) {
+          if (d.start && d.current) {
+            const [sx, sy] = d.start;
+            const [cxn, cyn] = d.current;
+            const rx = Math.min(sx, cxn);
+            const ry = Math.min(sy, cyn);
+            const rw = Math.abs(cxn - sx) * rect.width;
+            const rh = Math.abs(cyn - sy) * rect.height;
+            const [rxp, ryp] = normToCanvas(rx, ry);
+            ctx.beginPath();
+            ctx.rect(rxp, ryp, rw, rh);
+            ctx.fill();
+            ctx.stroke();
+          }
+        } else if (stateRef.current.draw.mode === "poly" || (stateRef.current.draw.mode == null && tool === "poly")) {
+          const pts = d.currentPoly || [];
+          if (pts.length >= 2) {
+            ctx.beginPath();
+            for (let i = 0; i < pts.length; i += 2) {
+              const [px, py] = normToCanvas(pts[i], pts[i + 1]);
+              if (i === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            if (d.current) {
+              const [mx, my] = d.current;
+              const [mxp, myp] = normToCanvas(mx, my);
+              ctx.lineTo(mxp, myp);
+            }
+            ctx.stroke();
+            // draw vertex handles for created vertices
+            for (let i = 0; i < pts.length; i += 2) {
+              const [vx, vy] = normToCanvas(pts[i], pts[i + 1]);
+              drawHandle(ctx, vx, vy, "#fff");
+            }
+          }
+        }
+      }
+
+      // crosshair with small central white dot and lines a little away from dot
       if (crosshair) {
-        const m = drawingState.current.mouse;
+        const m = stateRef.current.mouse;
         if (m && rect) {
-          ctx.strokeStyle = "rgba(255,255,255,0.5)";
-          ctx.lineWidth = 1;
-          // vertical
+          // translate mouse to canvas-local
+          const cRect = container.getBoundingClientRect();
+          const localX = m.cx - cRect.left;
+          const localY = m.cy - cRect.top;
+          ctx.save();
+          ctx.strokeStyle = "rgba(255,255,255,1)";
+          ctx.lineWidth = 2;
+
+          // draw vertical and horizontal lines leaving a gap of 6px around central dot
           ctx.beginPath();
-          ctx.moveTo(m.x - rect.left, 0);
-          ctx.lineTo(m.x - rect.left, canvas.height);
+          ctx.moveTo(localX, 0);
+          ctx.lineTo(localX, localY - 20);
+          ctx.moveTo(localX, localY + 20);
+          ctx.lineTo(localX, canvas.height);
           ctx.stroke();
-          // horizontal
+
           ctx.beginPath();
-          ctx.moveTo(0, m.y - rect.top);
-          ctx.lineTo(canvas.width, m.y - rect.top);
+          ctx.moveTo(0, localY);
+          ctx.lineTo(localX - 20, localY);
+          ctx.moveTo(localX + 20, localY);
+          ctx.lineTo(canvas.width, localY);
           ctx.stroke();
+
+          // central white dot
+          ctx.beginPath();
+          ctx.fillStyle = "white";
+          ctx.arc(localX, localY, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
         }
       }
 
       ctx.restore();
     };
 
-    // small helper to convert color to rgba for fill
+    // helpers used above
+    function drawHandle(ctx, x, y, color) {
+      ctx.beginPath();
+      ctx.fillStyle = "white";
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    function drawCenterDot(ctx, x, y) {
+      ctx.beginPath();
+      ctx.fillStyle = "white";
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
     function hexToRgba(hex, a) {
-      // convert hsl or hex? if already hsl return rgba approximation by using canvas fillStyle trick
+      if (!hex) return `rgba(0,0,0,${a})`;
       if (hex.startsWith("hsl")) {
-        // canvas can parse hsl and accept alpha via replacing hsl( -> hsla(
         return hex.replace("hsl(", "hsla(").replace(")", `, ${a})`);
       }
-      // hex to rgba
       const c = hex.replace("#", "");
-      const bigint = parseInt(c.length === 3 ? c.split("").map(ch=>ch+ch).join("") : c, 16);
+      const bigint = parseInt(c.length === 3 ? c.split("").map((ch) => ch + ch).join("") : c, 16);
       const r = (bigint >> 16) & 255;
       const g = (bigint >> 8) & 255;
       const b = bigint & 255;
       return `rgba(${r},${g},${b},${a})`;
     }
+    function polygonCentroid(pts, rect) {
+      if (!pts || pts.length < 6) return null;
+      let area = 0;
+      let cx = 0;
+      let cy = 0;
+      for (let i = 0; i < pts.length; i += 2) {
+        const x0 = pts[i], y0 = pts[i + 1];
+        const j = (i + 2) % pts.length;
+        const x1 = pts[j], y1 = pts[j + 1];
+        const a = x0 * y1 - x1 * y0;
+        area += a;
+        cx += (x0 + x1) * a;
+        cy += (y0 + y1) * a;
+      }
+      if (area === 0) return null;
+      area = area / 2;
+      cx = cx / (6 * area);
+      cy = cy / (6 * area);
+      return normToCanvas(cx, cy);
+    }
 
-    // Render loop
-    const raf = () => {
-      render();
-      requestRef = requestAnimationFrame(raf);
-    };
-    let requestRef = requestAnimationFrame(raf);
+    let rafId = requestAnimationFrame(function loop() {
+      draw();
+      rafId = requestAnimationFrame(loop);
+    });
 
     return () => {
-      cancelAnimationFrame(requestRef);
+      cancelAnimationFrame(rafId);
       window.removeEventListener("resize", resizeCanvas);
     };
-  }, [annotations, crosshair, zoom, selectedAnnId]); // re-render when annotations change
+  }, [annotations, selectedAnnId, crosshair, zoom, tool, images, currentIdx]);
 
-  // ---- Mouse handling on container (for drawing) ----
+  // --------------------- Interaction: pointer events for draw/edit ---------------------
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    const hitTestHandle = (clientX, clientY) => {
+      // returns {type: 'handle'|'vertex'|'inside'|'none', annId, index}
+      const rect = imageClientRect();
+      if (!rect) return { type: "none" };
+      const cRect = container.getBoundingClientRect();
+      const localX = clientX - cRect.left;
+      const localY = clientY - cRect.top;
+
+      // loop annotations top-to-bottom (reverse) to hit topmost first
+      for (let k = annotations.length - 1; k >= 0; k--) {
+        const a = annotations[k];
+        if (a.visible === false) continue;
+        if (a.type === "bbox") {
+          const [x1, y1, x2, y2] = a.points;
+          const [cx1, cy1] = normalizedToClient(x1, y1);
+          const [cx2, cy2] = normalizedToClient(x2, y2);
+          const left = Math.min(cx1, cx2), top = Math.min(cy1, cy2);
+          const right = Math.max(cx1, cx2), bottom = Math.max(cy1, cy2);
+          // compute container-local corners
+          const cLeft = left - cRect.left;
+          const cTop = top - cRect.top;
+          const cRight = right - cRect.left;
+          const cBottom = bottom - cRect.top;
+          // handle radius in local coords
+          const handleR = 8;
+          const corners = [
+            [cLeft, cTop],
+            [cRight, cTop],
+            [cRight, cBottom],
+            [cLeft, cBottom],
+          ];
+          for (let i = 0; i < corners.length; i++) {
+            const dx = localX - corners[i][0];
+            const dy = localY - corners[i][1];
+            if (dx * dx + dy * dy <= handleR * handleR) return { type: "corner", annId: a.id, index: i };
+          }
+          // inside bbox?
+          if (localX >= cLeft && localX <= cRight && localY >= cTop && localY <= cBottom) {
+            return { type: "inside", annId: a.id };
+          }
+        } else if (a.type === "poly") {
+          // vertex hit
+          for (let i = 0; i < a.points.length; i += 2) {
+            const [vx, vy] = normalizedToClient(a.points[i], a.points[i + 1]);
+            const lx = vx - container.getBoundingClientRect().left;
+            const ly = vy - container.getBoundingClientRect().top;
+            const dx = localX - lx;
+            const dy = localY - ly;
+            if (dx * dx + dy * dy <= 8 * 8) return { type: "vertex", annId: a.id, index: i / 2 };
+          }
+          // point-in-polygon test for inside (ray-casting)
+          const rect = imageClientRect();
+          if (!rect) continue;
+          // map local to normalized
+          const nx = (localX - (rect.left - container.getBoundingClientRect().left)) / rect.width;
+          const ny = (localY - (rect.top - container.getBoundingClientRect().top)) / rect.height;
+          if (pointInPoly(nx, ny, a.points)) return { type: "inside", annId: a.id };
+        }
+      }
+      return { type: "none" };
+    };
+
+    const pointInPoly = (x, y, pts) => {
+      // pts: [x,y,x,y...], x,y normalized
+      let inside = false;
+      for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
+        const xi = pts[i], yi = pts[i + 1];
+        const xj = pts[j], yj = pts[j + 1];
+        const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi + Number.EPSILON) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    };
+
     const onPointerDown = (e) => {
-      // only left button
+      // only left button for drawing/editing
       if (e.button && e.button !== 0) return;
+      stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
       const imgRect = imageClientRect();
       if (!imgRect) return;
-      // check if clicked inside image
+
+      // ignore if clicked outside image
       if (e.clientX < imgRect.left || e.clientX > imgRect.right || e.clientY < imgRect.top || e.clientY > imgRect.bottom) return;
 
-      const norm = clientToNormalized(e.clientX, e.clientY);
-      if (!norm) return;
-      if (tool === "bbox") {
-        drawingState.current.inProgress = true;
-        drawingState.current.mode = "bbox";
-        drawingState.current.start = norm;
-        drawingState.current.current = norm;
-      } else if (tool === "poly") {
-        // add point to poly
-        if (!drawingState.current.inProgress) {
-          drawingState.current.inProgress = true;
-          drawingState.current.mode = "poly";
-          drawingState.current.currentPoly = [norm[0], norm[1]];
+      const hit = hitTestHandle(e.clientX, e.clientY);
+
+      if (hit.type === "corner" || hit.type === "vertex" || hit.type === "inside") {
+        // start editing selected annotation
+        const ann = annotations.find((a) => a.id === hit.annId);
+        if (!ann) return;
+        setSelectedAnnId(ann.id);
+        stateRef.current.mode = "editing";
+        stateRef.current.edit.annId = ann.id;
+        if (hit.type === "corner") {
+          stateRef.current.edit.type = "corner";
+          stateRef.current.edit.index = hit.index; // 0..3
+        } else if (hit.type === "vertex") {
+          stateRef.current.edit.type = "vertex";
+          stateRef.current.edit.index = hit.index; // vertex index
         } else {
-          drawingState.current.currentPoly.push(norm[0], norm[1]);
+          stateRef.current.edit.type = "move";
+          stateRef.current.edit.index = null;
+          // store offset between mouse client and annotation center for move
+          // compute annotation center client coords
+          if (ann.type === "bbox") {
+            const [x1, y1, x2, y2] = ann.points;
+            const cx = ((x1 + x2) / 2);
+            const cy = ((y1 + y2) / 2);
+            const [centx, centy] = normalizedToClient(cx, cy);
+            stateRef.current.edit.offset = [e.clientX - centx, e.clientY - centy];
+          } else if (ann.type === "poly") {
+            // centroid approximate
+            const rect = imageClientRect();
+            const c = computePolyCentroidClient(ann.points, rect);
+            stateRef.current.edit.offset = [e.clientX - c[0], e.clientY - c[1]];
+          }
+        }
+        // start capturing pointermove/up
+      } else {
+        // start drawing new shape
+        const norm = clientToNormalized(e.clientX, e.clientY);
+        if (!norm) return;
+        stateRef.current.mode = "drawing";
+        if (tool === "bbox") {
+          stateRef.current.draw.inProgress = true;
+          stateRef.current.draw.mode = "bbox";
+          stateRef.current.draw.start = norm;
+          stateRef.current.draw.current = norm;
+        } else if (tool === "poly") {
+          if (!stateRef.current.draw.inProgress) {
+            stateRef.current.draw.inProgress = true;
+            stateRef.current.draw.mode = "poly";
+            stateRef.current.draw.currentPoly = [norm[0], norm[1]];
+            stateRef.current.draw.current = norm;
+          } else {
+            // if already drawing poly, add vertex
+            stateRef.current.draw.currentPoly.push(norm[0], norm[1]);
+          }
         }
       }
     };
 
     const onPointerMove = (e) => {
+      stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
       const imgRect = imageClientRect();
-      drawingState.current.mouse = { x: e.clientX, y: e.clientY };
       if (!imgRect) return;
-      const norm = clientToNormalized(e.clientX, e.clientY);
-      if (!norm) return;
-      if (drawingState.current.inProgress) {
-        if (drawingState.current.mode === "bbox") {
-          drawingState.current.current = norm;
-        } else if (drawingState.current.mode === "poly") {
-          drawingState.current.current = norm;
+
+      if (stateRef.current.mode === "drawing" && stateRef.current.draw.inProgress) {
+        const norm = clientToNormalized(e.clientX, e.clientY);
+        if (!norm) return;
+        stateRef.current.draw.current = norm;
+      } else if (stateRef.current.mode === "editing") {
+        const edit = stateRef.current.edit;
+        const annIdx = annotations.findIndex((a) => a.id === edit.annId);
+        if (annIdx === -1) return;
+        const ann = annotations[annIdx];
+        // mouse normalized
+        const norm = clientToNormalized(e.clientX, e.clientY);
+        if (!norm) return;
+        if (edit.type === "move") {
+          // compute delta normalized and move whole shape
+          const [offsetX, offsetY] = edit.offset || [0, 0];
+          // compute new center in client coords:
+          let newCenterClientX = e.clientX - offsetX;
+          let newCenterClientY = e.clientY - offsetY;
+          // convert to normalized center
+          const rect = imageClientRect();
+          const newCenterNx = (newCenterClientX - rect.left) / rect.width;
+          const newCenterNy = (newCenterClientY - rect.top) / rect.height;
+          // compute current center normalized and delta
+          if (ann.type === "bbox") {
+            const [x1, y1, x2, y2] = ann.points;
+            const cx = (x1 + x2) / 2;
+            const cy = (y1 + y2) / 2;
+            const dx = newCenterNx - cx;
+            const dy = newCenterNy - cy;
+            const newPts = [x1 + dx, y1 + dy, x2 + dx, y2 + dy].map((v) => Math.min(1, Math.max(0, v)));
+            setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
+          } else if (ann.type === "poly") {
+            const pts = ann.points.slice();
+            // compute centroid
+            let cx = 0, cy = 0;
+            for (let i = 0; i < pts.length; i += 2) {
+              cx += pts[i];
+              cy += pts[i+1];
+            }
+            cx /= (pts.length/2);
+            cy /= (pts.length/2);
+            const dx = newCenterNx - cx;
+            const dy = newCenterNy - cy;
+            const newPts = pts.map((v, i) => (i%2===0 ? Math.min(1, Math.max(0, v + dx)) : Math.min(1, Math.max(0, v + dy))));
+            setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
+          }
+        } else if (edit.type === "corner" && ann.type === "bbox") {
+          // corner indices 0..3 map to (x1,y1),(x2,y1),(x2,y2),(x1,y2)
+          const [nx, ny] = norm;
+          let [x1, y1, x2, y2] = ann.points;
+          if (edit.index === 0) {
+            x1 = nx; y1 = ny;
+          } else if (edit.index === 1) {
+            x2 = nx; y1 = ny;
+          } else if (edit.index === 2) {
+            x2 = nx; y2 = ny;
+          } else if (edit.index === 3) {
+            x1 = nx; y2 = ny;
+          }
+          // normalize ordering
+          const newPts = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)].map((v) => Math.min(1, Math.max(0, v)));
+          setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
+        } else if (edit.type === "vertex" && ann.type === "poly") {
+          const idx = edit.index;
+          const pts = ann.points.slice();
+          pts[idx*2] = norm[0];
+          pts[idx*2+1] = norm[1];
+          setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: pts } : it)));
         }
       }
     };
 
-    const finishBBox = () => {
-      const d = drawingState.current;
-      if (d.inProgress && d.mode === "bbox" && d.start && d.current) {
-        const [x1, y1] = d.start;
-        const [x2, y2] = d.current;
-        const bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
-        const ann = {
-          id: uid(),
-          type: "bbox",
-          points: bbox,
-          className: classes[0]?.name ?? "class",
-          color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
-        };
-        setAnnotations((p) => [...p, ann]);
+    const computePolyCentroidClient = (pts, rect) => {
+      if (!rect) return [0,0];
+      let cx = 0, cy = 0;
+      for (let i = 0; i < pts.length; i += 2) {
+        cx += pts[i]; cy += pts[i+1];
       }
-      d.inProgress = false;
-      d.start = null;
-      d.current = null;
+      cx /= pts.length/2; cy /= pts.length/2;
+      return normalizedToClient(cx, cy);
     };
 
     const onPointerUp = (e) => {
-      if (drawingState.current.inProgress && drawingState.current.mode === "bbox") {
-        finishBBox();
+      // finalize drawing or editing
+      if (stateRef.current.mode === "drawing") {
+        const d = stateRef.current.draw;
+        if (d.inProgress) {
+          if (d.mode === "bbox") {
+            if (d.start && d.current) {
+              const [x1, y1] = d.start;
+              const [x2, y2] = d.current;
+              const bbox = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)];
+              // ignore too small
+              if (Math.abs(bbox[2]-bbox[0]) > 0.002 && Math.abs(bbox[3]-bbox[1]) > 0.002) {
+                const ann = {
+                  id: uid(),
+                  type: "bbox",
+                  points: bbox,
+                  className: classes[0]?.name ?? "class",
+                  color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
+                  visible: true,
+                };
+                setAnnotations((p) => [...p, ann]);
+              }
+            }
+          } else if (d.mode === "poly") {
+            // when finishing poly by double-click or enter/context, we handle elsewhere; on pointerup we don't auto-close
+          }
+        }
+      }
+      // reset draw inprogress for bbox
+      if (stateRef.current.draw.inProgress && stateRef.current.draw.mode === "bbox") {
+        stateRef.current.draw.inProgress = false;
+        stateRef.current.draw.start = null;
+        stateRef.current.draw.current = null;
+      }
+      if (stateRef.current.mode === "editing") {
+        // clear editing
+        stateRef.current.edit = { annId: null, type: null, index: null, offset: null };
+        stateRef.current.mode = null;
+      } else if (stateRef.current.mode === "drawing") {
+        // remain in drawing mode for poly; for bbox we cleared above
+        if (stateRef.current.draw.mode === "bbox") {
+          stateRef.current.mode = null;
+        }
       }
     };
 
+    // right-click finishes polygon
     const onContext = (e) => {
-      // right-click finishes polygon (if creating)
-      if (drawingState.current.inProgress && drawingState.current.mode === "poly") {
+      const d = stateRef.current.draw;
+      if (d.inProgress && d.mode === "poly") {
         e.preventDefault();
-        const d = drawingState.current;
         const pts = d.currentPoly ?? [];
         if (pts.length >= 6) {
-          // close polygon
           const ann = {
             id: uid(),
             type: "poly",
             points: pts,
             className: classes[0]?.name ?? "class",
             color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
+            visible: true,
           };
           setAnnotations((p) => [...p, ann]);
         }
         d.inProgress = false;
         d.currentPoly = [];
         d.current = null;
+        stateRef.current.mode = null;
       }
     };
 
-    container.addEventListener("pointerdown", onPointerDown);
-    container.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    container.addEventListener("contextmenu", onContext);
-
-    // keyboard shortcuts
     const onKey = (ev) => {
       if (ev.key === "b" || ev.key === "B") setTool("bbox");
       if (ev.key === "p" || ev.key === "P") setTool("poly");
       if (ev.key === "Enter") {
-        // finish poly if exists
-        const d = drawingState.current;
+        const d = stateRef.current.draw;
         if (d.inProgress && d.mode === "poly") {
           const pts = d.currentPoly ?? [];
           if (pts.length >= 6) {
@@ -527,21 +827,22 @@ export default function Annotate() {
               points: pts,
               className: classes[0]?.name ?? "class",
               color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
+              visible: true,
             };
             setAnnotations((p) => [...p, ann]);
           }
           d.inProgress = false;
           d.currentPoly = [];
           d.current = null;
+          stateRef.current.mode = null;
         }
       }
       if (ev.key === "Delete" || ev.key === "Backspace") {
-        // remove selected annotation
         if (selectedAnnId) setAnnotations((p) => p.filter((a) => a.id !== selectedAnnId));
       }
       if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
         ev.preventDefault();
-        // save now
+        // manual save
         (async () => {
           const img = images[currentIdx];
           if (!img) return;
@@ -566,6 +867,10 @@ export default function Annotate() {
       }
     };
 
+    container.addEventListener("pointerdown", onPointerDown);
+    container.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    container.addEventListener("contextmenu", onContext);
     window.addEventListener("keydown", onKey);
 
     return () => {
@@ -575,9 +880,9 @@ export default function Annotate() {
       container.removeEventListener("contextmenu", onContext);
       window.removeEventListener("keydown", onKey);
     };
-  }, [tool, classes, annotations, selectedAnnId, images, currentIdx, dsId]);
+  }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId]);
 
-  // ---- Add class handler ----
+  // --------------------- Classes & annotation list helpers ---------------------
   const addClass = async () => {
     const name = newClassName.trim();
     if (!name) return;
@@ -590,14 +895,21 @@ export default function Annotate() {
     setNewClassName("");
   };
 
-  // ---- Annotation list UI handlers ----
   const updateAnnotationClass = (annId, className) => {
     const color = colorForLabel(className);
     setAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, className, color } : a)));
   };
+
   const deleteAnnotation = (annId) => setAnnotations((p) => p.filter((a) => a.id !== annId));
 
-  // ---- UI helpers ----
+  const toggleAnnotationVisible = (annId) => {
+    setAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, visible: !a.visible } : a)));
+  };
+
+
+
+
+  // --------------------- UI helpers ---------------------
   const currentImage = images[currentIdx];
 
   if (loading)
@@ -625,7 +937,7 @@ export default function Annotate() {
         color: themeColors.text,
       }}
     >
-      {/* Top toolbar */}
+      {/* Top toolbar (kept as you had it) */}
       <div
         style={{
           display: "flex",
@@ -737,7 +1049,6 @@ export default function Annotate() {
                     i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
                   borderRadius: 6,
                   overflow: "hidden",
-                  width: "100%",
                 }}
               >
                 {img.url ? (
@@ -770,11 +1081,20 @@ export default function Annotate() {
             background: themeColors.canvasBg ?? themeColors.background,
             position: "relative",
             overflow: "hidden",
+            
           }}
           ref={containerRef}
         >
+       
           {currentImage?.url ? (
             <>
+              <div
+                className="annotation-stage"
+                style={{
+                
+                  transition: "transform 0.05s linear",
+                }}
+              >
               <img
                 ref={imageRef}
                 src={currentImage.url}
@@ -784,6 +1104,7 @@ export default function Annotate() {
                   maxHeight: `85vh`,
                   objectFit: "contain",
                   display: "block",
+                  
                 }}
                 onError={(e) => {
                   e.currentTarget.src = "";
@@ -844,6 +1165,7 @@ export default function Annotate() {
                   </Button>
                 </div>
               </div>
+              </div>
             </>
           ) : (
             <div style={{ textAlign: "center", color: themeColors.subtleText }}>
@@ -878,34 +1200,39 @@ export default function Annotate() {
                     key={a.id}
                     active={a.id === selectedAnnId}
                     onClick={() => setSelectedAnnId(a.id)}
-                    style={{ display: "flex", 
-                              gap: 8, 
-                              alignItems: "center", 
+                    style={{ display: "flex",
+                              gap: 8,
+                              alignItems: "center",
                               justifyContent: "space-between",
                               color: themeColors.text,
                               backgroundColor: themeColors.cardBg,
                               border: `1px solid ${themeColors.border}`,}}
                   >
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
                       <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
+                      <div style={{ flex: 1 }}>
+                        <Form.Select
+                          size="sm"
+                          value={a.className}
+                          onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
+                        >
+                          {classes.map((c) => (
+                            <option key={c.id} value={c.name}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </Form.Select>
+                      </div>
                     </div>
-                    <div style={{ display: "flex",width: '100%', gap: 6 }}>
-                      <Form.Select
-                        size="sm"
-                        value={a.className}
-                        onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
-                        style={{ maxWidth:"50%" }}
-                      >
-                        {classes.map((c) => (
-                          <option key={c.id} value={c.name}>
-                            {c.name}
-                          </option>
-                        ))}
-                      </Form.Select>
-                    </div>
+
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
+                        {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </Button>
                       <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
                         <Trash2 size={14} />
                       </Button>
+                    </div>
                   </ListGroup.Item>
                 ))}
               </ListGroup>
@@ -923,13 +1250,9 @@ export default function Annotate() {
                   placeholder="New class name"
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") addClass();
-                  }}
+                  onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
                 />
-                <Button variant="primary" size="sm" onClick={addClass}>
-                  Add
-                </Button>
+                <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
               </InputGroup>
             </div>
 
@@ -945,7 +1268,6 @@ export default function Annotate() {
                       size="sm"
                       variant="outline-secondary"
                       onClick={() => {
-                        // assign selected annotation to this class if any selected
                         if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
                       }}
                     >
@@ -962,18 +1284,13 @@ export default function Annotate() {
           <div style={{ display: "flex", gap: 8 }}>
             <Button
               variant="outline-secondary"
-              onClick={() => {
-                // go prev
-                setCurrentIdx((i) => Math.max(0, i - 1));
-              }}
+              onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}
             >
               <ChevronLeft size={14} /> Prev
             </Button>
             <Button
               variant="outline-secondary"
-              onClick={() => {
-                setCurrentIdx((i) => Math.min(images.length - 1, i + 1));
-              }}
+              onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}
             >
               Next <ChevronRight size={14} />
             </Button>
