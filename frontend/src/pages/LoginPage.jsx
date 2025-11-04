@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { FaGoogle } from "react-icons/fa";
 import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "../components/ThemeContext";
+import logo from "../assets/logo-removebg.png";
 
 const LoginPage = () => {
   const [authMode, setAuthMode] = useState("login"); // 'login', 'signup', or 'reset'
@@ -45,7 +46,7 @@ const LoginPage = () => {
         }}
       >
         <img
-          src="src/assets/logo-removebg.png"
+          src={logo}
           alt="HexLabel Logo"
           style={{ width: "120px", marginBottom: "1.5rem" }}
         />
@@ -100,7 +101,8 @@ const LoginPage = () => {
                   backgroundColor: themeColors.inputBg,
                   color: themeColors.text,
                   border: `1px solid ${themeColors.border}`,
-                }}
+                  
+                } }
               />
             )}
             <input

@@ -27,6 +27,7 @@ import {
   Eye,
   EyeOff,
   Trash2,
+  // added Hand icon
 } from "lucide-react";
 import { db } from "../utils/db";
 import { useTheme } from "../components/ThemeContext";
@@ -62,13 +63,18 @@ export default function Annotate() {
   const [newClassName, setNewClassName] = useState("");
   const [selectedAnnId, setSelectedAnnId] = useState(null);
 
+  // Pan/hand tool state (NEW)
+  const [handMode, setHandMode] = useState(false); // toggle button
+  const panRef = useRef({ x: 0, y: 0 });
+  const panStartRef = useRef(null); // {clientX, clientY, startX, startY}
+  const spaceDownRef = useRef(false);
+
   // refs
   const imageRef = useRef(null);
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const createdUrlsRef = useRef(new Set());
   const autosaveTimer = useRef(null);
-
 
   // drawing/edit state (mutable ref to avoid re-render loops)
   const stateRef = useRef({
@@ -78,6 +84,7 @@ export default function Annotate() {
       start: null, // normalized [x,y]
       current: null, // normalized [x,y]
       currentPoly: [], // normalized [x,y,...]
+      mode: null,
     },
     edit: {
       annId: null,
@@ -86,6 +93,7 @@ export default function Annotate() {
       offset: null, // client offset during move
     },
     mouse: { cx: 0, cy: 0 }, // client coords
+    hover: { type: "none", annId: null, index: null }, // NEW: for handle hover
   });
 
   // helpers: ensure folder permission (same as before)
@@ -214,6 +222,9 @@ export default function Annotate() {
         }));
         setAnnotations(normalized);
         setSelectedAnnId(null);
+        // reset pan/zoom when image changes
+        panRef.current = { x: 0, y: 0 };
+        setZoom(1);
       } catch (e) {
         console.warn("Failed to load annotations:", e);
         setAnnotations([]);
@@ -221,7 +232,6 @@ export default function Annotate() {
     };
     loadForImage();
   }, [images, currentIdx, dsId]);
-
 
   // --------------------- AUTOSAVE (debounced) ---------------------
   const scheduleSave = useCallback(() => {
@@ -256,6 +266,8 @@ export default function Annotate() {
   }, [annotations, scheduleSave]);
 
   // --------------------- Coordinate helpers ---------------------
+  // Note: imageClientRect relies on the rendered img bounding rect which already
+  // reflects CSS transforms (translate + scale). That makes mapping simpler.
   const imageClientRect = () => {
     const imgEl = imageRef.current;
     if (!imgEl) return null;
@@ -312,7 +324,6 @@ export default function Annotate() {
         // fill with 30% opacity
         ctx.strokeStyle = stroke;
         ctx.lineWidth = a.id === selectedAnnId ? 3 : 2;
-        // ctx.fillStyle = stroke.startsWith("hsl") ? stroke.replace("hsl(", "hsla(").replace(")", ", 0.32)") : hexToRgba(stroke, 0.05);
         ctx.fillStyle = "rgba(255,255,255,0.30)";
 
         if (a.type === "bbox") {
@@ -331,14 +342,15 @@ export default function Annotate() {
             [x2, y2],
             [x1, y2],
           ];
-          corners.forEach((c) => {
+          corners.forEach((c, i) => {
             const [hx, hy] = normToCanvas(c[0], c[1]);
-            drawHandle(ctx, hx, hy, stroke);
+            // If hovered handle -> draw ring (hollow) larger
+            if (stateRef.current.hover.type === "corner" && stateRef.current.hover.annId === a.id && stateRef.current.hover.index === i) {
+              drawHandleHover(ctx, hx, hy, stroke);
+            } else {
+              drawHandle(ctx, hx, hy, stroke);
+            }
           });
-          // white center dot
-          // const centerX = cx + w / 2;
-          // const centerY = cy + h / 2;
-          // drawCenterDot(ctx, centerX, centerY);
         } else if (a.type === "poly") {
           const pts = a.points;
           if (pts.length < 6) continue;
@@ -354,13 +366,13 @@ export default function Annotate() {
           // vertex handles
           for (let i = 0; i < pts.length; i += 2) {
             const [vx, vy] = normToCanvas(pts[i], pts[i + 1]);
-            drawHandle(ctx, vx, vy, stroke);
+            const vidx = i / 2;
+            if (stateRef.current.hover.type === "vertex" && stateRef.current.hover.annId === a.id && stateRef.current.hover.index === vidx) {
+              drawHandleHover(ctx, vx, vy, stroke);
+            } else {
+              drawHandle(ctx, vx, vy, stroke);
+            }
           }
-          // center dot (compute polygon centroid approx)
-          // const centroid = polygonCentroid(pts, rect);
-          // if (centroid) {
-          //   drawCenterDot(ctx, centroid[0], centroid[1]);
-          // }
         }
       }
 
@@ -420,7 +432,7 @@ export default function Annotate() {
           ctx.strokeStyle = "rgba(255,255,255,1)";
           ctx.lineWidth = 2;
 
-          // draw vertical and horizontal lines leaving a gap of 6px around central dot
+          // draw vertical and horizontal lines leaving a gap of 20px around central dot
           ctx.beginPath();
           ctx.moveTo(localX, 0);
           ctx.lineTo(localX, localY - 20);
@@ -442,6 +454,9 @@ export default function Annotate() {
           ctx.fill();
           ctx.restore();
         }
+      } else {
+        // when crosshair disabled show small central dot only (still painted above).
+        // But we already draw dot only when crosshair true; if you want dot-only mode, adjust here.
       }
 
       ctx.restore();
@@ -449,6 +464,7 @@ export default function Annotate() {
 
     // helpers used above
     function drawHandle(ctx, x, y, color) {
+      // default handle: small white filled dot with colored ring
       ctx.beginPath();
       ctx.fillStyle = "white";
       ctx.arc(x, y, 5, 0, Math.PI * 2);
@@ -458,6 +474,19 @@ export default function Annotate() {
       ctx.lineWidth = 2;
       ctx.arc(x, y, 7, 0, Math.PI * 2);
       ctx.stroke();
+    }
+    function drawHandleHover(ctx, x, y, color) {
+      // hovered handle: hollow ring (bigger), no inner dot
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.stroke();
+      // subtle inner translucent fill to hint hover (optional)
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fill();
     }
     function drawCenterDot(ctx, x, y) {
       ctx.beginPath();
@@ -509,10 +538,14 @@ export default function Annotate() {
     };
   }, [annotations, selectedAnnId, crosshair, zoom, tool, images, currentIdx]);
 
-  // --------------------- Interaction: pointer events for draw/edit ---------------------
+  // --------------------- Interaction: pointer events for draw/edit + pan/hover ---------------------
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    // ensure cursor hidden on annotation stage — we draw crosshair/dot ourselves
+    // but keep default cursor for interactive controls (buttons) — container only covers center stage.
+    container.style.cursor = "none";
 
     const hitTestHandle = (clientX, clientY) => {
       // returns {type: 'handle'|'vertex'|'inside'|'none', annId, index}
@@ -537,8 +570,8 @@ export default function Annotate() {
           const cTop = top - cRect.top;
           const cRight = right - cRect.left;
           const cBottom = bottom - cRect.top;
-          // handle radius in local coords
-          const handleR = 8;
+          // handle radius in local coords (hover radius)
+          const handleR = 12; // increased to make hover easier
           const corners = [
             [cLeft, cTop],
             [cRight, cTop],
@@ -562,7 +595,7 @@ export default function Annotate() {
             const ly = vy - container.getBoundingClientRect().top;
             const dx = localX - lx;
             const dy = localY - ly;
-            if (dx * dx + dy * dy <= 8 * 8) return { type: "vertex", annId: a.id, index: i / 2 };
+            if (dx * dx + dy * dy <= 12 * 12) return { type: "vertex", annId: a.id, index: i / 2 };
           }
           // point-in-polygon test for inside (ray-casting)
           const rect = imageClientRect();
@@ -588,16 +621,68 @@ export default function Annotate() {
       return inside;
     };
 
+    // helper: set hover based on pointer
+    const updateHover = (clientX, clientY) => {
+      const hit = hitTestHandle(clientX, clientY);
+      if (hit.type === "corner" || hit.type === "vertex") {
+        const hv = { type: hit.type, annId: hit.annId, index: hit.index };
+        stateRef.current.hover = hv;
+      } else {
+        stateRef.current.hover = { type: "none", annId: null, index: null };
+      }
+    };
+
+    // PAN helpers
+    const startPan = (e) => {
+      panStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startX: panRef.current.x,
+        startY: panRef.current.y,
+      };
+      // set container cursor to grabbing visually (but we keep the cursor hidden per request; if you want visible, set '' or 'grabbing')
+      // container.style.cursor = 'grabbing';
+    };
+    const doPan = (e) => {
+      if (!panStartRef.current) return;
+      const dx = e.clientX - panStartRef.current.clientX;
+      const dy = e.clientY - panStartRef.current.clientY;
+      panRef.current.x = panStartRef.current.startX + dx;
+      panRef.current.y = panStartRef.current.startY + dy;
+      // apply transform to image
+      const img = imageRef.current;
+      if (img) {
+        img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`;
+        img.style.transition = "transform 0s";
+        img.style.transformOrigin = "center center";
+      }
+    };
+    const endPan = () => {
+      panStartRef.current = null;
+      // container.style.cursor = 'none'; // keep hidden
+    };
+
+    // DRAW/EDIT/INTERACTION handlers
     const onPointerDown = (e) => {
-      // only left button for drawing/editing
+      // only left button for drawing/editing; but allow middle/left for pan if needed
       if (e.button && e.button !== 0) return;
       stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
+
+      // If hand mode (toggle) OR space pressed -> start panning
+      if (handMode || spaceDownRef.current) {
+        startPan(e);
+        // capture pointer moves for pan (we won't do drawing)
+        return;
+      }
+
       const imgRect = imageClientRect();
       if (!imgRect) return;
 
       // ignore if clicked outside image
       if (e.clientX < imgRect.left || e.clientX > imgRect.right || e.clientY < imgRect.top || e.clientY > imgRect.bottom) return;
 
+      // update hover before hit test (ensures we detect vertex/corner)
+      updateHover(e.clientX, e.clientY);
       const hit = hitTestHandle(e.clientX, e.clientY);
 
       if (hit.type === "corner" || hit.type === "vertex" || hit.type === "inside") {
@@ -620,8 +705,8 @@ export default function Annotate() {
           // compute annotation center client coords
           if (ann.type === "bbox") {
             const [x1, y1, x2, y2] = ann.points;
-            const cx = ((x1 + x2) / 2);
-            const cy = ((y1 + y2) / 2);
+            const cx = (x1 + x2) / 2;
+            const cy = (y1 + y2) / 2;
             const [centx, centy] = normalizedToClient(cx, cy);
             stateRef.current.edit.offset = [e.clientX - centx, e.clientY - centy];
           } else if (ann.type === "poly") {
@@ -631,7 +716,7 @@ export default function Annotate() {
             stateRef.current.edit.offset = [e.clientX - c[0], e.clientY - c[1]];
           }
         }
-        // start capturing pointermove/up
+        // start capturing pointermove/up (editing will be performed in pointermove handler)
       } else {
         // start drawing new shape
         const norm = clientToNormalized(e.clientX, e.clientY);
@@ -658,6 +743,16 @@ export default function Annotate() {
 
     const onPointerMove = (e) => {
       stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
+
+      // Update hover always (so handle becomes ring)
+      updateHover(e.clientX, e.clientY);
+
+      // If panning
+      if (panStartRef.current) {
+        doPan(e);
+        return;
+      }
+
       const imgRect = imageClientRect();
       if (!imgRect) return;
 
@@ -744,6 +839,12 @@ export default function Annotate() {
     };
 
     const onPointerUp = (e) => {
+      // finalize panning if active
+      if (panStartRef.current) {
+        endPan();
+        return;
+      }
+
       // finalize drawing or editing
       if (stateRef.current.mode === "drawing") {
         const d = stateRef.current.draw;
@@ -813,7 +914,62 @@ export default function Annotate() {
       }
     };
 
+    // Ctrl/Cmd + scroll to zoom centered at cursor (NEW)
+    const onWheel = (e) => {
+      // If user holds ctrl or meta, perform zoom centered at mouse pointer
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = -e.deltaY;
+        const zoomFactor = delta > 0 ? 1.08 : 0.92;
+        const newZoom = Math.min(4, Math.max(0.25, zoom * zoomFactor));
+        // adjust pan so zoom centers on cursor
+        const rect = imageClientRect();
+        if (!rect) {
+          setZoom(newZoom);
+          return;
+        }
+        // cursor point relative to image
+        const cursorX = e.clientX;
+        const cursorY = e.clientY;
+        // compute cursor position normalized within image BEFORE zoom
+        const nx = (cursorX - rect.left) / rect.width;
+        const ny = (cursorY - rect.top) / rect.height;
+        // compute image center in client coords and current pan
+        const img = imageRef.current;
+        const prevScale = zoom;
+        const nextScale = newZoom;
+        // We'll update pan so that the point under the cursor stays under the cursor
+        // client point = imgLeft + nx * imgWidth * prevScale + pan.x
+        // After zoom: imgLeft' + nx * imgWidth * nextScale + pan'.x should equal cursorX
+        // Using getBoundingClientRect to compute current image left/top should already reflect pan+scale,
+        // so a simpler approach is compute the difference and adjust pan by (cursor - newRectCursor)
+        // Temporarily set scale to compute new bounding rect: apply transform, read rect, then compute pan delta.
+        // To avoid flicker we compute mathematically: deltaPan = (1 - nextScale/prevScale) * (cursor - imageCenter) 
+        // approximate using image center:
+        const imgCenterX = rect.left + rect.width / 2;
+        const imgCenterY = rect.top + rect.height / 2;
+        const dx = cursorX - imgCenterX;
+        const dy = cursorY - imgCenterY;
+        const ratio = (nextScale / prevScale) - 1;
+        panRef.current.x -= dx * ratio;
+        panRef.current.y -= dy * ratio;
+        // apply new zoom and pan
+        setZoom(newZoom);
+        if (img) {
+          img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${newZoom})`;
+          img.style.transformOrigin = "center center";
+        }
+      }
+    };
+
     const onKey = (ev) => {
+      // space toggles pan while held
+      if (ev.code === "Space") {
+        if (ev.type === "keydown") {
+          spaceDownRef.current = true;
+        }
+        // don't prevent default here to avoid breaking page scroll when not over canvas
+      }
       if (ev.key === "b" || ev.key === "B") setTool("bbox");
       if (ev.key === "p" || ev.key === "P") setTool("poly");
       if (ev.key === "Enter") {
@@ -867,20 +1023,36 @@ export default function Annotate() {
       }
     };
 
+    const onKeyUp = (ev) => {
+      if (ev.code === "Space") spaceDownRef.current = false;
+    };
+
+    // Attach listeners
     container.addEventListener("pointerdown", onPointerDown);
     container.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     container.addEventListener("contextmenu", onContext);
+    container.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+
+    // Ensure image transform matches state initially
+    const img = imageRef.current;
+    if (img) {
+      img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`;
+      img.style.transformOrigin = "center center";
+    }
 
     return () => {
       container.removeEventListener("pointerdown", onPointerDown);
       container.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       container.removeEventListener("contextmenu", onContext);
+      container.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
     };
-  }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId]);
+  }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId, handMode, zoom]);
 
   // --------------------- Classes & annotation list helpers ---------------------
   const addClass = async () => {
@@ -905,9 +1077,6 @@ export default function Annotate() {
   const toggleAnnotationVisible = (annId) => {
     setAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, visible: !a.visible } : a)));
   };
-
-
-
 
   // --------------------- UI helpers ---------------------
   const currentImage = images[currentIdx];
@@ -974,15 +1143,41 @@ export default function Annotate() {
             <Triangle size={14} /> Polygon
           </Button>
 
-          <Button variant="outline-secondary" size="sm" onClick={() => setZoom((z) => Math.max(0.25, z - 0.25))}>
+          <Button variant="outline-secondary" size="sm" onClick={() => {
+            // zoom out and keep image centered
+            setZoom((z) => {
+              const nz = Math.max(0.25, z - 0.25);
+              const img = imageRef.current;
+              if (img) img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${nz})`;
+              return nz;
+            });
+          }}>
             <ZoomOut size={14} />
           </Button>
-          <Button variant="outline-secondary" size="sm" onClick={() => setZoom((z) => Math.min(3, z + 0.25))}>
+          <Button variant="outline-secondary" size="sm" onClick={() => {
+            setZoom((z) => {
+              const nz = Math.min(3, z + 0.25);
+              const img = imageRef.current;
+              if (img) img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${nz})`;
+              return nz;
+            });
+          }}>
             <ZoomIn size={14} />
           </Button>
 
           <Button variant="outline-secondary" size="sm" onClick={() => setCrosshair((s) => !s)}>
             {crosshair ? <Eye size={14} /> : <EyeOff size={14} />}
+          </Button>
+
+          {/* Hand mode toggle (NEW) */}
+          <Button
+            variant={handMode ? "primary" : "outline-secondary"}
+            size="sm"
+            onClick={() => setHandMode((h) => !h)}
+            title="Toggle hand tool (or hold Space)"
+          >
+            {/* Use text "Hand" to avoid adding extra icon dependency */}
+            Hand
           </Button>
 
           <Button
@@ -1081,7 +1276,6 @@ export default function Annotate() {
             background: themeColors.canvasBg ?? themeColors.background,
             position: "relative",
             overflow: "hidden",
-            
           }}
           ref={containerRef}
         >
@@ -1091,8 +1285,9 @@ export default function Annotate() {
               <div
                 className="annotation-stage"
                 style={{
-                
                   transition: "transform 0.05s linear",
+                  // hide default cursor over stage (we render crosshair/dot ourselves)
+                  // Note: buttons and sidebar will still use system cursor
                 }}
               >
               <img
@@ -1100,11 +1295,14 @@ export default function Annotate() {
                 src={currentImage.url}
                 alt={currentImage.name}
                 style={{
-                  maxWidth: `${100 * zoom}%`,
+                  maxWidth: `100%`,
                   maxHeight: `85vh`,
                   objectFit: "contain",
                   display: "block",
-                  
+                  // transform will be set dynamically (pan + zoom)
+                  transform: `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`,
+                  transformOrigin: "center center",
+                  userSelect: "none",
                 }}
                 onError={(e) => {
                   e.currentTarget.src = "";
