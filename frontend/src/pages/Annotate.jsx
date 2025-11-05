@@ -46,7 +46,7 @@ export default function Annotate() {
   const navigate = useNavigate();
   const { themeColors } = useTheme();
 
-  const dsId = Number(datasetId);
+  const dsId = datasetId;
   const [job, setJob] = useState(null);
   const [dataset, setDataset] = useState(null);
   const [project, setProject] = useState(null);
@@ -117,7 +117,7 @@ export default function Annotate() {
     (async () => {
       try {
         const [proj, ds, jb] = await Promise.all([
-          db.projects.get(Number(projectId)),
+          db.projects.get(projectId),
           db.datasets.get(dsId),
           db.jobs.get(jobId),
         ]);
@@ -198,6 +198,13 @@ export default function Annotate() {
     };
   }, [projectId, datasetId, jobId]);
 
+ // --------------------- ANNOTATIONS REF ---------------------
+  const annotationsRef = useRef(annotations);
+  useEffect(() => {
+    annotationsRef.current = annotations;
+    scheduleSave(); // schedule autosave whenever annotations change
+  }, [annotations]);
+
   // --------------------- LOAD annotations for current image ---------------------
   useEffect(() => {
     const loadForImage = async () => {
@@ -206,22 +213,26 @@ export default function Annotate() {
         setAnnotations([]);
         return;
       }
+
       try {
         const rec = await db.annotations
           .where({ datasetId: dsId, imageName: img.name })
           .first();
         const data = rec?.data ?? [];
+
         // normalize annotations, add visible flag
-        const normalized = data.map((a) => ({
-          id: a.id ?? uid(),
+        const normalized = data.map((a, index) => ({
+          id: a.id || index.toString(), // fallback id
           type: a.type,
           points: a.points,
           className: a.className || "class",
-          color: a.color || colorForLabel(a.className || "class"),
-          visible: a.visible === false ? false : true,
+          color: a.color || "#FF0000", // fallback color
+          visible: a.visible !== false,
         }));
+
         setAnnotations(normalized);
         setSelectedAnnId(null);
+
         // reset pan/zoom when image changes
         panRef.current = { x: 0, y: 0 };
         setZoom(1);
@@ -230,40 +241,56 @@ export default function Annotate() {
         setAnnotations([]);
       }
     };
+
     loadForImage();
   }, [images, currentIdx, dsId]);
 
   // --------------------- AUTOSAVE (debounced) ---------------------
   const scheduleSave = useCallback(() => {
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+
     autosaveTimer.current = setTimeout(async () => {
       const img = images[currentIdx];
       if (!img) return;
+
       try {
         const payload = {
           datasetId: dsId,
           imageName: img.name,
-          data: annotations,
+          data: annotationsRef.current,
           updatedAt: new Date().toISOString(),
         };
-        const existing = await db.annotations
-          .where({ datasetId: dsId, imageName: img.name })
-          .first();
-        if (existing) await db.annotations.update(existing.id, payload);
-        else await db.annotations.add(payload);
-        //console.log("autosaved");
-      } catch (err) {
-        console.error("Failed autosave:", err);
-      }
-    }, 1200);
-  }, [annotations, currentIdx, images, dsId]);
 
+        const existing = await db.annotations
+          .where("datasetId")
+          .equals(dsId)
+          .and((a) => a.imageName === img.name)
+          .first();
+
+        if (existing) {
+          await db.annotations.update(existing.id, payload);
+        } else {
+          payload.id = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+          await db.annotations.add(payload);
+        }
+
+        console.log("✅ autosaved:", img.name);
+      } catch (err) {
+        console.error("❌ Failed autosave:", err);
+      }
+    }, 800);
+  }, [currentIdx, images, dsId]);
+
+  // --------------------- EFFECT TO TRIGGER AUTOSAVE ---------------------
   useEffect(() => {
+    if (images.length === 0) return;
     scheduleSave();
+
     return () => {
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     };
-  }, [annotations, scheduleSave]);
+  }, [currentIdx, images, scheduleSave]);
+
 
   // --------------------- Coordinate helpers ---------------------
   // Note: imageClientRect relies on the rendered img bounding rect which already
@@ -457,6 +484,22 @@ export default function Annotate() {
       } else {
         // when crosshair disabled show small central dot only (still painted above).
         // But we already draw dot only when crosshair true; if you want dot-only mode, adjust here.
+        const m = stateRef.current.mouse;
+        if (m && rect) {
+          // translate mouse to canvas-local
+          const cRect = container.getBoundingClientRect();
+          const localX = m.cx - cRect.left;
+          const localY = m.cy - cRect.top;
+          ctx.save();
+          ctx.strokeStyle = "rgba(255,255,255,1)";
+          ctx.lineWidth = 2;
+          // central white dot
+          ctx.beginPath();
+          ctx.fillStyle = "white";
+          ctx.arc(localX, localY, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
       }
 
       ctx.restore();

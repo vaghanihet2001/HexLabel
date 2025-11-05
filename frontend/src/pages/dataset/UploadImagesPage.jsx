@@ -1,4 +1,3 @@
-// frontend/src/pages/dataset/UploadImagesPage.jsx
 import React, { useState, useEffect, useRef } from "react";
 import { Button, Card, Row, Col, Form, Spinner } from "react-bootstrap";
 import { db } from "../../utils/db";
@@ -15,20 +14,26 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
   const [statusText, setStatusText] = useState("Loading...");
   const createdUrlsRef = useRef(new Set());
 
-  // 🧠 Load images
+  // 🧠 Load temp images from IndexedDB
   useEffect(() => {
     let mounted = true;
     const loadImages = async () => {
       setLoading(true);
       try {
-        const stored = await db.images?.where("datasetId").equals(datasetId).toArray();
+        const stored = await db.tempImages
+          ?.where("datasetId")
+          .equals(datasetId)
+          .toArray();
+
         const mapped = stored.map((it) => ({
           ...it,
-          url: it.url || undefined,
+          url: it.url || URL.createObjectURL(it.blob), // recreate preview URL if missing
         }));
+
+        mapped.forEach((m) => createdUrlsRef.current.add(m.url));
         if (mounted) setImages(mapped);
       } catch (err) {
-        console.error("Failed to load images:", err);
+        console.error("Failed to load temp images:", err);
       } finally {
         if (mounted) {
           setLoading(false);
@@ -40,9 +45,10 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     return () => (mounted = false);
   }, [datasetId]);
 
-  // 🖼️ Upload images (temporary in DB)
+  // 🖼️ Upload images → store as blob in tempImages (with UUID filenames)
   const handleFiles = async (files) => {
-    if (!files?.length) return;
+    const imageFiles = Array.from(files).filter(file => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) return alert("No valid images selected");
     setLoading(true);
     setStatusText("Uploading images...");
 
@@ -50,22 +56,29 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     try {
       for (const file of files) {
         const id = crypto.randomUUID();
-        const objUrl = URL.createObjectURL(file);
-        createdUrlsRef.current.add(objUrl);
+        const extIndex = file.name.lastIndexOf(".");
+        const ext = extIndex !== -1 ? file.name.slice(extIndex) : "";
+        const blob = new Blob([await file.arrayBuffer()], { type: file.type });
+        const url = URL.createObjectURL(blob);
+        createdUrlsRef.current.add(url);
+
         const img = {
           id,
           datasetId,
-          name: file.name,
-          file,
-          url: objUrl,
+          name: `${id}${ext}`, // file stored with image ID
+          originalName: file.name,
+          blob,
+          url,
           uploadedAt: new Date().toISOString(),
         };
-        await db.images.put(img);
+
+        await db.tempImages.put(img);
         newImages.push(img);
       }
+
       setImages((prev) => [...prev, ...newImages]);
     } catch (err) {
-      console.error(err);
+      console.error("Image upload failed:", err);
       alert("Failed to upload images.");
     } finally {
       setLoading(false);
@@ -73,13 +86,14 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     }
   };
 
-  // 🖱️ Drag & drop
+  // 🖱️ Drag & Drop
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (["dragenter", "dragover"].includes(e.type)) setDragActive(true);
     else if (e.type === "dragleave") setDragActive(false);
   };
+
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -88,23 +102,23 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
   };
 
   // 🧩 Selection logic
-  const toggleSelect = (id) => {
+  const toggleSelect = (id) =>
     setSelected((prev) => {
       const copy = new Set(prev);
       copy.has(id) ? copy.delete(id) : copy.add(id);
       return copy;
     });
-  };
+
   const selectAll = () => setSelected(new Set(images.map((i) => i.id)));
   const clearSelection = () => setSelected(new Set());
 
-  // 🗑️ Delete selected
+  // 🗑️ Delete selected temp images
   const deleteSelected = async () => {
     if (selected.size === 0) return;
-    if (!confirm("Delete selected images?")) return;
+    if (!confirm("Delete selected uploaded images?")) return;
     setLoading(true);
     try {
-      for (const id of selected) await db.images.delete(id);
+      for (const id of selected) await db.tempImages.delete(id);
       setImages((prev) => prev.filter((i) => !selected.has(i.id)));
       setSelected(new Set());
     } catch (err) {
@@ -114,12 +128,12 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     }
   };
 
-  // 🧹 Clear all
+  // 🧹 Clear all temp images
   const clearAll = async () => {
-    if (!confirm("Clear all images?")) return;
+    if (!confirm("Clear all uploaded images?")) return;
     setLoading(true);
     try {
-      await db.images.where("datasetId").equals(datasetId).delete();
+      await db.tempImages.where("datasetId").equals(datasetId).delete();
       setImages([]);
       setSelected(new Set());
     } catch (err) {
@@ -129,40 +143,49 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     }
   };
 
-  // 🚀 Create annotation job + copy files to dataset folder
+  // 🚀 Create Annotation Job (copy from tempImages → images)
   const createJob = async () => {
     if (selected.size === 0) return alert("Select at least one image first.");
     setLoading(true);
     setStatusText("Creating annotation job...");
 
     try {
-      const dataset = await db.datasets.get(Number(datasetId));
-      if (!dataset?.folderHandle) throw new Error("Dataset folder not selected by user.");
+      const dataset = await db.datasets.get(datasetId);
+      if (!dataset?.folderHandle)
+        throw new Error("Dataset folder not selected by user.");
 
       // 📁 Ensure raw_images folder exists
-      const rawFolderHandle = await dataset.folderHandle.getDirectoryHandle("raw_images", { create: true });
+      const rawFolderHandle = await dataset.folderHandle.getDirectoryHandle(
+        "raw_images",
+        { create: true }
+      );
       const imageIds = [];
 
-      // 🔁 Copy selected images into raw_images/
       for (const id of selected) {
-        const imgRec = await db.images.get(id);
-        if (!imgRec?.file) continue;
-        const targetHandle = await rawFolderHandle.getFileHandle(imgRec.name, { create: true });
+        const imgRec = await db.tempImages.get(id);
+        if (!imgRec?.blob) continue;
+
+        const targetHandle = await rawFolderHandle.getFileHandle(imgRec.name, {
+          create: true,
+        });
         const writable = await targetHandle.createWritable();
-        await writable.write(await imgRec.file.arrayBuffer());
+        await writable.write(await imgRec.blob.arrayBuffer());
         await writable.close();
 
-        // update image record to use relative path
-        await db.images.update(id, {
+        const newImage = {
+          id: imgRec.id, // keep the same UUID for consistency
+          datasetId,
+          jobId: null,
+          name: imgRec.name,
+          originalName: imgRec.originalName,
           path: `raw_images/${imgRec.name}`,
-          jobId: null, // assigned later per job
-          url: undefined,
-        });
-
-        imageIds.push(id);
+          createdAt: new Date().toISOString(),
+        };
+        await db.images.put(newImage);
+        imageIds.push(newImage.id);
       }
 
-      // 🧱 Create job
+      // 🧩 Create job entry
       const job = {
         id: crypto.randomUUID(),
         datasetId,
@@ -173,10 +196,10 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
       };
       await db.jobs.add(job);
 
-      alert("✅ Job created and images saved in dataset folder!");
+      alert("✅ Job created successfully!");
       if (onJobCreated) onJobCreated();
     } catch (err) {
-      console.error(err);
+      console.error("Job creation failed:", err);
       alert("Failed to create job.");
     } finally {
       setLoading(false);
@@ -213,7 +236,9 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
             alignItems: "center",
             justifyContent: "center",
             backgroundColor:
-              theme === "dark" ? "rgba(0,0,0,0.65)" : "rgba(255,255,255,0.75)",
+              theme === "dark"
+                ? "rgba(0,0,0,0.65)"
+                : "rgba(255,255,255,0.75)",
             zIndex: 20,
             borderRadius: 12,
             backdropFilter: "blur(4px)",
@@ -230,7 +255,7 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
         </div>
       )}
 
-      {/* Upload box */}
+      {/* Upload Box */}
       <div className="text-center mb-4">
         <h5 style={{ color: themeColors.text }}>
           <UploadCloud size={20} className="me-2" />
@@ -306,7 +331,7 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
                   <div style={{ height: 120, overflow: "hidden", borderRadius: "8px 8px 0 0" }}>
                     <img
                       src={img.url}
-                      alt={img.name}
+                      alt={img.originalName}
                       style={{
                         width: "100%",
                         height: "100%",
@@ -314,11 +339,10 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
                         display: "block",
                       }}
                       onError={(e) => {
-                        const el = e.target;
-                        if (img.file instanceof Blob) {
-                          const u = URL.createObjectURL(img.file);
-                          el.src = u;
-                          createdUrlsRef.current.add(u);
+                        if (img.blob) {
+                          const newUrl = URL.createObjectURL(img.blob);
+                          e.target.src = newUrl;
+                          createdUrlsRef.current.add(newUrl);
                         }
                       }}
                     />
@@ -326,7 +350,7 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
 
                   <Card.Body className="p-2 text-center">
                     <div style={{ fontSize: "0.8rem", color: themeColors.subtleText }}>
-                      {img.name}
+                      {img.originalName}
                     </div>
                     <div style={{ fontSize: "0.7rem", color: themeColors.subtleText }}>
                       {new Date(img.uploadedAt).toLocaleString()}

@@ -24,7 +24,7 @@ export default function DatasetPage() {
   useEffect(() => {
     const loadDataset = async () => {
       try {
-        const ds = await db.datasets.get(Number(datasetId));
+        const ds = await db.datasets.get(datasetId);
         setDataset(ds);
         console.log("📦 Loaded dataset:", datasetId, ds);
       } catch (err) {
@@ -45,7 +45,7 @@ export default function DatasetPage() {
       style={{
         backgroundColor: themeColors.background,
         color: themeColors.text,
-        minHeight: "100vh",
+        height: "calc(100vh - 60px)",
         transition: "background-color 0.3s ease",
       }}
     >

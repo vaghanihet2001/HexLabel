@@ -1,4 +1,3 @@
-// frontend/src/pages/Projects.jsx
 import React, { useEffect, useState } from "react";
 import {
   Card,
@@ -11,7 +10,15 @@ import {
   Tooltip,
 } from "react-bootstrap";
 import { useTheme } from "../components/ThemeContext";
-import { Edit, Trash2, Plus, Database, Cpu, FolderOpen, Lock } from "lucide-react";
+import {
+  Edit,
+  Trash2,
+  Plus,
+  Database,
+  Cpu,
+  FolderOpen,
+  Lock,
+} from "lucide-react";
 import { db } from "../utils/db";
 
 export default function Projects() {
@@ -22,39 +29,32 @@ export default function Projects() {
   const [currentProject, setCurrentProject] = useState(null);
   const [permissionNeeded, setPermissionNeeded] = useState(false);
 
-  // Load projects and compute dataset counts dynamically
+  // ✅ Load projects and compute dataset counts dynamically
   useEffect(() => {
     const init = async () => {
-      try {
-        // Ensure Dexie stores exist
-        db.version(2).stores({
-          projects: "++id, name, description, datasets, models, folderHandle",
-          datasets: "++id, name, projectId, folderHandle, createdAt",
-        });
-      } catch (e) {
-        // ignore version errors
-      }
-
-      // Load all projects and compute dataset counts
       const projectsWithCounts = await Promise.all(
         (await db.projects.toArray()).map(async (proj) => {
-          const count = await db.datasets.where("projectId").equals(proj.id).count();
+          const count = await db.datasets
+            .where("projectId")
+            .equals(proj.id)
+            .count();
           return { ...proj, datasets: count };
         })
       );
-
       setProjects(projectsWithCounts);
     };
     init();
   }, []);
 
-  // Folder selection with write permission
+  // ✅ Folder selection with write permission
   const handleSelectFolder = async () => {
     try {
       const handle = await window.showDirectoryPicker();
       const perm = await handle.requestPermission({ mode: "readwrite" });
       if (perm !== "granted") {
-        alert("Write permission not granted. Please allow access to save project data.");
+        alert(
+          "Write permission not granted. Please allow access to save project data."
+        );
         setPermissionNeeded(true);
         setCurrentProject((p) => ({ ...p, folderHandle: handle }));
         return;
@@ -66,7 +66,7 @@ export default function Projects() {
     }
   };
 
-  // Save or update a project
+  // ✅ Save or update a project
   const handleSaveProject = async (e) => {
     e.preventDefault();
     if (!currentProject) return;
@@ -87,28 +87,24 @@ export default function Projects() {
     }
 
     const toStore = {
-      id: currentProject.id || undefined,
+      id: currentProject.id || crypto.randomUUID(),
       name: currentProject.name,
       description: currentProject.description,
       datasets: currentProject.datasets || 0,
       models: currentProject.models || 0,
       folderHandle: fh,
-      createdAt: currentProject.createdAt || new Date().toLocaleString(),
+      createdAt: currentProject.createdAt || new Date().toISOString(),
     };
 
     try {
-      let id;
-      if (toStore.id) {
-        await db.projects.put(toStore);
-        id = toStore.id;
-      } else {
-        id = await db.projects.add(toStore);
-      }
+      await db.projects.put(toStore);
 
-      // Recompute dataset counts dynamically
       const projectsWithCounts = await Promise.all(
         (await db.projects.toArray()).map(async (proj) => {
-          const count = await db.datasets.where("projectId").equals(proj.id).count();
+          const count = await db.datasets
+            .where("projectId")
+            .equals(proj.id)
+            .count();
           return { ...proj, datasets: count };
         })
       );
@@ -123,32 +119,57 @@ export default function Projects() {
     }
   };
 
-  // Delete a project
+  // ✅ Delete a project and all related data
   const handleDeleteProject = async () => {
     if (!currentProject) return;
-    await db.projects.delete(currentProject.id);
+    const projectId = currentProject.id;
 
-    // Recompute dataset counts dynamically
-    const projectsWithCounts = await Promise.all(
-      (await db.projects.toArray()).map(async (proj) => {
-        const count = await db.datasets.where("projectId").equals(proj.id).count();
-        return { ...proj, datasets: count };
-      })
-    );
+    try {
+      const datasets = await db.datasets
+        .where("projectId")
+        .equals(projectId)
+        .toArray();
 
-    setProjects(projectsWithCounts);
-    setShowDelete(false);
-    setCurrentProject(null);
+      for (const ds of datasets) {
+        await db.datasetVersions.where("datasetId").equals(ds.id).delete();
+        await db.annotations.where("datasetId").equals(ds.id).delete();
+        await db.images.where("datasetId").equals(ds.id).delete();
+        await db.jobs.where("datasetId").equals(ds.id).delete();
+        await db.tempImages.where("datasetId").equals(ds.id).delete();
+      }
+
+      await db.datasets.where("projectId").equals(projectId).delete();
+      await db.projects.delete(projectId);
+
+      const projectsWithCounts = await Promise.all(
+        (await db.projects.toArray()).map(async (proj) => {
+          const count = await db.datasets
+            .where("projectId")
+            .equals(proj.id)
+            .count();
+          return { ...proj, datasets: count };
+        })
+      );
+
+      setProjects(projectsWithCounts);
+      setShowDelete(false);
+      setCurrentProject(null);
+    } catch (err) {
+      console.error("Error deleting project:", err);
+      alert("Failed to delete project. Check console for details.");
+    }
   };
 
-  // Grant permission to existing project folder
+  // ✅ Grant permission to existing project folder
   const handleGrantPermissionForProject = async (proj) => {
     if (!proj?.folderHandle) {
       alert("No folder handle present — reselect folder.");
       return;
     }
     try {
-      const perm = await proj.folderHandle.requestPermission({ mode: "readwrite" });
+      const perm = await proj.folderHandle.requestPermission({
+        mode: "readwrite",
+      });
       if (perm === "granted") {
         alert("Permission granted. You can now create datasets inside this project.");
       } else {
@@ -171,7 +192,10 @@ export default function Projects() {
   return (
     <div
       className="p-4"
-      style={{ backgroundColor: themeColors.background, color: themeColors.text }}
+      style={{
+        backgroundColor: themeColors.background,
+        color: themeColors.text,
+      }}
     >
       <div className="d-flex justify-content-between align-items-center mb-4">
         <h2 className="fw-semibold mb-0">Projects</h2>
@@ -213,7 +237,9 @@ export default function Projects() {
               </div>
               <Card.Body className="pt-2">
                 <h5 className="mb-1">{project.name}</h5>
-                <p style={{ opacity: 0.8, minHeight: 40 }}>{project.description}</p>
+                <p style={{ opacity: 0.8, minHeight: 40 }}>
+                  {project.description}
+                </p>
 
                 <div className="d-flex justify-content-between mb-2">
                   <span>
@@ -290,13 +316,26 @@ export default function Projects() {
       </Row>
 
       {/* Add/Edit Modal */}
-      <Modal show={showEdit} onHide={() => setShowEdit(false)} centered >
-        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
+      <Modal show={showEdit} onHide={() => setShowEdit(false)} centered>
+        <Modal.Header
+          closeButton
+          style={{
+            backgroundColor: themeColors.cardBg,
+            color: themeColors.text,
+            borderColor: themeColors.border,
+          }}
+        >
           <Modal.Title>
             {currentProject?.id ? "Edit Project" : "Add Project"}
           </Modal.Title>
         </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
+        <Modal.Body
+          style={{
+            backgroundColor: themeColors.cardBg,
+            color: themeColors.text,
+            borderColor: themeColors.border,
+          }}
+        >
           <Form onSubmit={handleSaveProject}>
             <Form.Group className="mb-3">
               <Form.Label>Project Name</Form.Label>
@@ -304,7 +343,10 @@ export default function Projects() {
                 type="text"
                 value={currentProject?.name || ""}
                 onChange={(e) =>
-                  setCurrentProject({ ...currentProject, name: e.target.value })
+                  setCurrentProject({
+                    ...currentProject,
+                    name: e.target.value,
+                  })
                 }
                 required
               />
@@ -317,7 +359,10 @@ export default function Projects() {
                 rows={2}
                 value={currentProject?.description || ""}
                 onChange={(e) =>
-                  setCurrentProject({ ...currentProject, description: e.target.value })
+                  setCurrentProject({
+                    ...currentProject,
+                    description: e.target.value,
+                  })
                 }
               />
             </Form.Group>
@@ -365,14 +410,36 @@ export default function Projects() {
 
       {/* Delete Modal */}
       <Modal show={showDelete} onHide={() => setShowDelete(false)} centered>
-        <Modal.Header closeButton style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
+        <Modal.Header
+          closeButton
+          style={{
+            backgroundColor: themeColors.cardBg,
+            color: themeColors.text,
+            borderColor: themeColors.border,
+          }}
+        >
           <Modal.Title>Confirm Deletion</Modal.Title>
         </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.cardBg ,color: themeColors.text,bordercolor: themeColors.border}}>
-          Are you sure you want to delete Project : {" "}
+        <Modal.Body
+          style={{
+            backgroundColor: themeColors.cardBg,
+            color: themeColors.text,
+            borderColor: themeColors.border,
+          }}
+        >
+          Are you sure you want to delete Project:{" "}
           <strong>{currentProject?.name}</strong>?
+          <div className="text-danger small mt-2">
+            This will delete all datasets, images, annotations, and jobs.
+          </div>
         </Modal.Body>
-        <Modal.Footer style={{ backgroundColor: themeColors.cardBg,color: themeColors.text,bordercolor: themeColors.border}}>
+        <Modal.Footer
+          style={{
+            backgroundColor: themeColors.cardBg,
+            color: themeColors.text,
+            borderColor: themeColors.border,
+          }}
+        >
           <Button variant="secondary" onClick={() => setShowDelete(false)}>
             Cancel
           </Button>

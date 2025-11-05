@@ -1,4 +1,3 @@
-// frontend/src/pages/ProjectPage.jsx
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
@@ -13,7 +12,7 @@ import {
 } from "react-bootstrap";
 import { Database, FolderOpen, Plus, Trash2, Lock } from "lucide-react";
 import { useTheme } from "../components/ThemeContext";
-import { db } from "../utils/db";
+import { db, generateId } from "../utils/db";
 
 export default function ProjectPage() {
   const { projectId } = useParams();
@@ -26,23 +25,21 @@ export default function ProjectPage() {
   const [newDatasetName, setNewDatasetName] = useState("");
   const [hasPermission, setHasPermission] = useState(true);
 
-  // ✅ new delete modal states
+  // delete modal states
   const [showDelete, setShowDelete] = useState(false);
   const [datasetToDelete, setDatasetToDelete] = useState(null);
 
+  /** 🔄 Load project and datasets */
   useEffect(() => {
     const load = async () => {
-      const proj = await db.projects.get(Number(projectId));
+      const proj = await db.projects.get(projectId);
       if (!proj) {
         setProject(null);
         return;
       }
       setProject(proj);
 
-      const sets = await db.datasets
-        .where("projectId")
-        .equals(Number(projectId))
-        .toArray();
+      const sets = await db.datasets.where("projectId").equals(projectId).toArray();
       setDatasets(sets);
 
       // Check folder permission
@@ -62,6 +59,7 @@ export default function ProjectPage() {
     load();
   }, [projectId]);
 
+  /** 🔐 Request folder permission again */
   const handleGrantPermission = async () => {
     if (!project?.folderHandle) {
       alert("Project folder not available. Re-select project folder in Projects page.");
@@ -80,6 +78,7 @@ export default function ProjectPage() {
     }
   };
 
+  /** ➕ Add Dataset */
   const handleAddDataset = async (e) => {
     e.preventDefault();
     if (!newDatasetName.trim()) {
@@ -91,15 +90,9 @@ export default function ProjectPage() {
       return;
     }
 
-    // Ensure write permission
-    let state = await project.folderHandle.queryPermission({
-      mode: "readwrite",
-    });
-    if (state !== "granted") {
-      state = await project.folderHandle.requestPermission({
-        mode: "readwrite",
-      });
-    }
+    let state = await project.folderHandle.queryPermission({ mode: "readwrite" });
+    if (state !== "granted")
+      state = await project.folderHandle.requestPermission({ mode: "readwrite" });
     if (state !== "granted") {
       alert("Write permission required. Click 'Grant Folder Access' first.");
       setHasPermission(false);
@@ -107,24 +100,20 @@ export default function ProjectPage() {
     }
 
     try {
-      // Create dataset folder inside project folder
-      const dsFolder = await project.folderHandle.getDirectoryHandle(
-        newDatasetName,
-        { create: true }
-      );
-
-      // Store dataset metadata (Dexie can clone the handle)
-      await db.datasets.add({
-        name: newDatasetName,
-        projectId: Number(projectId),
-        folderHandle: dsFolder,
-        createdAt: new Date().toLocaleString(),
+      const datasetId = generateId(); // 🆕 string-based unique ID
+      const dsFolder = await project.folderHandle.getDirectoryHandle(newDatasetName, {
+        create: true,
       });
 
-      const updated = await db.datasets
-        .where("projectId")
-        .equals(Number(projectId))
-        .toArray();
+      await db.datasets.add({
+        id: datasetId,
+        name: newDatasetName,
+        projectId: projectId,
+        folderHandle: dsFolder,
+        createdAt: new Date().toISOString(),
+      });
+
+      const updated = await db.datasets.where("projectId").equals(projectId).toArray();
       setDatasets(updated);
       setShowAdd(false);
       setNewDatasetName("");
@@ -134,11 +123,13 @@ export default function ProjectPage() {
     }
   };
 
-  /** 🗑️ Delete dataset folder and entry */
+  /** 🧹 Delete ALL data related to a dataset */
   const handleConfirmDeleteDataset = async () => {
     if (!datasetToDelete) return;
     try {
-      // 1️⃣ Delete from file system if possible
+      const datasetId = datasetToDelete.id;
+
+      // 1️⃣ Delete dataset folder from file system
       if (project?.folderHandle) {
         try {
           await project.folderHandle.removeEntry(datasetToDelete.name, {
@@ -150,21 +141,27 @@ export default function ProjectPage() {
         }
       }
 
-      // 2️⃣ Delete from IndexedDB
-      await db.datasets.delete(datasetToDelete.id);
+      // 2️⃣ Delete all related entries in Dexie
+      await Promise.all([
+        db.images.where("datasetId").equals(datasetId).delete(),
+        db.jobs.where("datasetId").equals(datasetId).delete(),
+        db.annotations.where("datasetId").equals(datasetId).delete(),
+        db.tempImages.where("datasetId").equals(datasetId).delete(),
+        db.datasetVersions.where("datasetId").equals(datasetId).delete(),
+        db.datasets.delete(datasetId),
+      ]);
+
+      console.log(`🧽 Deleted dataset ${datasetId} and all related records`);
 
       // 3️⃣ Refresh dataset list
-      const updated = await db.datasets
-        .where("projectId")
-        .equals(Number(projectId))
-        .toArray();
+      const updated = await db.datasets.where("projectId").equals(projectId).toArray();
       setDatasets(updated);
 
       setShowDelete(false);
       setDatasetToDelete(null);
     } catch (err) {
       console.error("❌ Failed to delete dataset:", err);
-      alert("Failed to delete dataset.");
+      alert("Failed to delete dataset and related data.");
     }
   };
 
@@ -251,7 +248,7 @@ export default function ProjectPage() {
                 <Card.Body className="pt-2">
                   <h5 className="mb-1">{ds.name}</h5>
                   <p className="mb-2 small" style={{ color: themeColors.subtleText }}>
-                    {ds.createdAt}
+                    {new Date(ds.createdAt).toLocaleString()}
                   </p>
 
                   <div className="d-flex justify-content-between">
@@ -331,9 +328,8 @@ export default function ProjectPage() {
         </Modal.Header>
         <Modal.Body style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}>
           Are you sure you want to delete the dataset{" "}
-          <strong>{datasetToDelete?.name}</strong>?
-          <br />
-          This will permanently remove its folder and files.
+          <strong>{datasetToDelete?.name}</strong>?<br />
+          This will permanently remove its folder and all related records.
         </Modal.Body>
         <Modal.Footer style={{ backgroundColor: themeColors.cardBg }}>
           <Button variant="secondary" onClick={() => setShowDelete(false)}>
