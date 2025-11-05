@@ -13,6 +13,7 @@ import {
   ListGroup,
   Form,
   InputGroup,
+  Modal,
 } from "react-bootstrap";
 import {
   ArrowLeft,
@@ -27,6 +28,8 @@ import {
   Eye,
   EyeOff,
   Trash2,
+  Keyboard,
+  TagIcon,
   // added Hand icon
 } from "lucide-react";
 import { db } from "../utils/db";
@@ -95,6 +98,18 @@ export default function Annotate() {
     mouse: { cx: 0, cy: 0 }, // client coords
     hover: { type: "none", annId: null, index: null }, // NEW: for handle hover
   });
+
+  // History state for undo/redo
+  const [history, setHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  // Shortcuts modal state
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  // Panel state
+  const [leftPanelOpen, setLeftPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const classInputRef = useRef(null);
 
   // helpers: ensure folder permission (same as before)
   async function ensureFolderAccess(handle) {
@@ -1011,34 +1026,57 @@ export default function Annotate() {
         if (ev.type === "keydown") {
           spaceDownRef.current = true;
         }
-        // don't prevent default here to avoid breaking page scroll when not over canvas
       }
+
+      // Tool shortcuts
       if (ev.key === "b" || ev.key === "B") setTool("bbox");
       if (ev.key === "p" || ev.key === "P") setTool("poly");
-      if (ev.key === "Enter") {
-        const d = stateRef.current.draw;
-        if (d.inProgress && d.mode === "poly") {
-          const pts = d.currentPoly ?? [];
-          if (pts.length >= 6) {
-            const ann = {
-              id: uid(),
-              type: "poly",
-              points: pts,
-              className: classes[0]?.name ?? "class",
-              color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
-              visible: true,
-            };
-            setAnnotations((p) => [...p, ann]);
+
+      // In onKey handler, add guard for class name input
+      const activeElement = document.activeElement;
+      const isClassInputFocused = classInputRef.current && classInputRef.current === activeElement;
+
+      // Navigation shortcuts (A/D and Arrow keys)
+      if (!isClassInputFocused) {
+        if (ev.key === "a" || ev.key === "A" || ev.key === "ArrowLeft") {
+          handlePrevImage();
+        }
+        if (ev.key === "d" || ev.key === "D" || ev.key === "ArrowRight") {
+          handleNextImage();
+        }
+      }
+
+      // Undo/Redo
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === "z") {
+        ev.preventDefault();
+        if (ev.shiftKey) {
+          // Redo
+          if (historyIndex < history.length - 1) {
+            setHistoryIndex(i => i + 1);
+            setAnnotations(history[historyIndex + 1]);
           }
+        } else {
+          // Undo
+          if (historyIndex > 0) {
+            setHistoryIndex(i => i - 1);
+            setAnnotations(history[historyIndex - 1]);
+          }
+        }
+      }
+
+      // ESC to cancel drawing
+      if (ev.key === "Escape") {
+        const d = stateRef.current.draw;
+        if (d.inProgress) {
           d.inProgress = false;
           d.currentPoly = [];
           d.current = null;
+          d.start = null;
           stateRef.current.mode = null;
         }
       }
-      if (ev.key === "Delete" || ev.key === "Backspace") {
-        if (selectedAnnId) setAnnotations((p) => p.filter((a) => a.id !== selectedAnnId));
-      }
+
+      // Save shortcut
       if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
         ev.preventDefault();
         // manual save
@@ -1063,6 +1101,11 @@ export default function Annotate() {
             alert("Save failed. See console.");
           }
         })();
+      }
+
+      // Fix Delete key to delete annotation
+      if ((ev.key === "Delete" || ev.key === "Backspace") && ev.type === "keydown") {
+        if (selectedAnnId) deleteAnnotation(selectedAnnId);
       }
     };
 
@@ -1112,14 +1155,71 @@ export default function Annotate() {
 
   const updateAnnotationClass = (annId, className) => {
     const color = colorForLabel(className);
-    setAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, className, color } : a)));
+    updateAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, className, color } : a)));
   };
 
-  const deleteAnnotation = (annId) => setAnnotations((p) => p.filter((a) => a.id !== annId));
+  const deleteAnnotation = (annId) => updateAnnotations((p) => p.filter((a) => a.id !== annId));
 
   const toggleAnnotationVisible = (annId) => {
-    setAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, visible: !a.visible } : a)));
+    updateAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, visible: !a.visible } : a)));
   };
+
+  // Add to history
+  const addToHistory = (newAnnotations) => {
+    const newHistory = history.slice(0, historyIndex + 1);
+    newHistory.push([...newAnnotations]);
+    setHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+  };
+
+  // Update setAnnotations to track history
+  const updateAnnotations = (updater) => {
+    setAnnotations((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      addToHistory(next);
+      return next;
+    });
+  };
+
+  // Handle next image
+  const handleNextImage = () => {
+    if (currentIdx < images.length - 1) {
+      setCurrentIdx((i) => Math.min(images.length - 1, i + 1));
+    }
+  };
+
+  // Handle previous image
+  const handlePrevImage = () => {
+    if (currentIdx > 0) {
+      setCurrentIdx((i) => Math.max(0, i - 1));
+    }
+  };
+
+  // Shortcuts Modal
+  const ShortcutsModal = () => (
+    <Modal show={showShortcuts} onHide={() => setShowShortcuts(false)}>
+      <Modal.Header closeButton>
+        <Modal.Title>Keyboard Shortcuts</Modal.Title>
+      </Modal.Header>
+      <Modal.Body>
+        <table className="table table-sm">
+          <tbody>
+            <tr><td><kbd>B</kbd></td><td>Box Tool</td></tr>
+            <tr><td><kbd>P</kbd></td><td>Polygon Tool</td></tr>
+            <tr><td><kbd>A</kbd> or <kbd>←</kbd></td><td>Previous Image</td></tr>
+            <tr><td><kbd>D</kbd> or <kbd>→</kbd></td><td>Next Image</td></tr>
+            <tr><td><kbd>Space</kbd></td><td>Hold for Pan Tool</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Cancel Drawing</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Redo</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save</td></tr>
+            <tr><td><kbd>Delete</kbd></td><td>Delete Selected</td></tr>
+            <tr><td><kbd>Enter</kbd></td><td>Complete Polygon</td></tr>
+          </tbody>
+        </table>
+      </Modal.Body>
+    </Modal>
+  );
 
   // --------------------- UI helpers ---------------------
   const currentImage = images[currentIdx];
@@ -1223,6 +1323,16 @@ export default function Annotate() {
             Hand
           </Button>
 
+          {/* Add Shortcuts Help Button */}
+          <Button
+            variant="outline-secondary"
+            size="sm"
+            onClick={() => setShowShortcuts(true)}
+            title="Show Keyboard Shortcuts"
+          >
+            <Keyboard size={14} />
+          </Button>
+
           <Button
             variant="success"
             size="sm"
@@ -1251,64 +1361,117 @@ export default function Annotate() {
           >
             <Save size={14} /> Save
           </Button>
+
+          {/* Delete Image Button */}
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={async () => {
+              if (!images[currentIdx]) return;
+              const imgToDelete = images[currentIdx];
+              // Remove image from images array
+              setImages((imgs) => imgs.filter((img, idx) => idx !== currentIdx));
+              // Move to previous image if possible
+              setCurrentIdx((idx) => Math.max(0, idx - 1));
+              // Optionally, delete annotations for this image from db
+              try {
+                await db.annotations.where({ datasetId: dsId, imageName: imgToDelete.name }).delete();
+              } catch (err) {
+                console.error("Failed to delete image annotations:", err);
+              }
+            }}
+            title="Delete current image"
+          >
+            <Trash2 size={14} /> Delete Image
+          </Button>
         </div>
       </div>
 
       {/* Main content */}
       <div style={{ display: "flex", flex: 1, height: "calc(100% - 60px)" }}>
+        <div className="image-annotation-left-panel" style={{ position: "relative",height: "100%" }}>
+        <div style = {{position: "absolute",
+                       top: 10, 
+                       left: leftPanelOpen ? 310 : 10, 
+                       zIndex: 1, 
+                       display: "flex", 
+                       alignItems: "center", 
+                       gap: 4, 
+                       padding: "4px 8px",
+                      background: themeColors.toolbarBg, 
+                      borderRadius: 6, 
+                      border: `1px solid ${themeColors.border}`}}
+              onClick={() => setLeftPanelOpen((open) => !open)}>
+          images <ImageIcon></ImageIcon>
+        </div>
         {/* Left thumbnails */}
-        <div
-          style={{
-            width: 300,
-            borderRight: `1px solid ${themeColors.border}`,
-            background: themeColors.sidebarBg,
-            padding: 8,
-            overflowY: "auto",
-          }}
-        >
-          <div className="d-flex justify-content-between align-items-center mb-2">
-            <b>Images</b>
-            <Badge bg="secondary">{images.length}</Badge>
-          </div>
+        {leftPanelOpen && (
           <div
             style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 8,
+              width: 300,
+              height: "100%",
+              borderRight: `1px solid ${themeColors.border}`,
+              background: themeColors.sidebarBg,
+              padding: 8,
+              overflowY: "auto",
+              transition: "width 0.2s",
+              position: "relative",
             }}
           >
-            {images.map((img, i) => (
-              <div
-                key={img.id}
-                onClick={() => setCurrentIdx(i)}
-                style={{
-                  cursor: "pointer",
-                  border:
-                    i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
-                  borderRadius: 6,
-                  overflow: "hidden",
-                }}
-              >
-                {img.url ? (
-                  <img
-                    src={img.url}
-                    alt={img.name}
-                    style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
-                    onError={(e) => {
-                      e.currentTarget.src = "";
-                      console.warn("Thumbnail failed:", img.url);
-                    }}
-                  />
-                ) : (
-                  <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: themeColors.subtleText }}>
-                    <ImageIcon />
-                  </div>
-                )}
-              </div>
-            ))}
+            {/* <Button
+              variant="outline-secondary"
+              size="sm"
+              style={{ position: "absolute", left: 8, top: 8, zIndex: 2 }}
+              onClick={() => setLeftPanelOpen(false)}
+              title="Hide sidebar"
+            >
+              <ChevronLeft size={14} />
+            </Button> */}
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <b>Images</b>
+              <Badge bg="secondary">{images.length}</Badge>
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 8,
+              }}
+            >
+              {images.map((img, i) => (
+                <div
+                  key={img.id}
+                  onClick={() => setCurrentIdx(i)}
+                  style={{
+                    cursor: "pointer",
+                    border:
+                      i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
+                    borderRadius: 6,
+                    overflow: "hidden",
+                  }}
+                >
+                  {img.url ? (
+                    <img
+                      src={img.url}
+                      alt={img.name}
+                      style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
+                      onError={(e) => {
+                        e.currentTarget.src = "";
+                        console.warn("Thumbnail failed:", img.url);
+                      }}
+                    />
+                  ) : (
+                    <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: themeColors.subtleText }}>
+                      <ImageIcon />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
+        )}
+     
         </div>
-
         {/* Center: image + canvas overlay */}
         <div
           style={{
@@ -1416,131 +1579,164 @@ export default function Annotate() {
           )}
         </div>
 
+        <div className="image-annotation-right-panel" style={{ position: "relative" }}>
+        <div style = {{position: "absolute",
+                       top: 10, 
+                       right: rightPanelOpen ? 310 : 10, 
+                       zIndex: 1, 
+                       display: "flex", 
+                       alignItems: "center", 
+                       gap: 4, 
+                       padding: "4px 8px",
+                      background: themeColors.toolbarBg, 
+                      borderRadius: 6, 
+                      border: `1px solid ${themeColors.border}`}}
+            onClick={() => setRightPanelOpen((open) => !open)}>
+          labels <TagIcon></TagIcon>
+        </div>
         {/* Right: annotations & classes */}
-        <div
-          style={{
-            width: 320,
-            borderLeft: `1px solid ${themeColors.border}`,
-            background: themeColors.sidebarBg,
-            padding: 12,
-            overflowY: "auto",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <h6 style={{ margin: 0 }}>Annotations</h6>
-            <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
-          </div>
-
-          <div style={{ marginBottom: 8 ,width: '100%'}}>
-            {annotations.length === 0 ? (
-              <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
-            ) : (
-              <ListGroup>
-                {annotations.map((a) => (
-                  <ListGroup.Item
-                    key={a.id}
-                    active={a.id === selectedAnnId}
-                    onClick={() => setSelectedAnnId(a.id)}
-                    style={{ display: "flex",
-                              gap: 8,
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              color: themeColors.text,
-                              backgroundColor: themeColors.cardBg,
-                              border: `1px solid ${themeColors.border}`,}}
-                  >
-                    <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                      <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
-                      <div style={{ flex: 1 }}>
-                        <Form.Select
-                          size="sm"
-                          value={a.className}
-                          onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
-                        >
-                          {classes.map((c) => (
-                            <option key={c.id} value={c.name}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </Form.Select>
-                      </div>
-                    </div>
-
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
-                        {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
-                      </Button>
-                      <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
-                        <Trash2 size={14} />
-                      </Button>
-                    </div>
-                  </ListGroup.Item>
-                ))}
-              </ListGroup>
-            )}
-          </div>
-
-          <hr />
-
-          <div style={{ marginBottom: 8 }}>
-            <h6 style={{ marginBottom: 8 }}>Classes</h6>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <InputGroup>
-                <Form.Control
-                  size="sm"
-                  placeholder="New class name"
-                  value={newClassName}
-                  onChange={(e) => setNewClassName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
-                />
-                <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
-              </InputGroup>
+        {rightPanelOpen && (
+          <div
+            style={{
+              width: 300,
+              height: "100%",
+              borderRight: `1px solid ${themeColors.border}`,
+              background: themeColors.sidebarBg,
+              padding: 8,
+              overflowY: "auto",
+              transition: "width 0.2s",
+              position: "relative",
+            }}
+          >
+            {/* <Button
+              variant="outline-secondary"
+              size="sm"
+              style={{ position: "absolute",height: '100px', left: -5, top:"50%", zIndex: 2 }}
+              onClick={() => setRightPanelOpen(false)}
+              title="Hide sidebar"
+            >
+              <ChevronRight size={14} />
+            </Button> */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <h6 style={{ margin: 0 }}>Annotations</h6>
+              <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {classes.map((c) => (
-                <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
-                    <div>{c.name}</div>
-                  </div>
-                  <div>
-                    <Button
-                      size="sm"
-                      variant="outline-secondary"
-                      onClick={() => {
-                        if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
-                      }}
+            <div style={{ marginBottom: 8 ,width: '100%'}}>
+              {annotations.length === 0 ? (
+                <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
+              ) : (
+                <ListGroup>
+                  {annotations.map((a) => (
+                    <ListGroup.Item
+                      key={a.id}
+                      active={a.id === selectedAnnId}
+                      onClick={() => setSelectedAnnId(a.id)}
+                      style={{ display: "flex",
+                                gap: 8,
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                color: themeColors.text,
+                                backgroundColor: themeColors.cardBg,
+                                border: `1px solid ${themeColors.border}`,}}
                     >
-                      Assign
-                    </Button>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                        <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
+                        <div style={{ flex: 1 }}>
+                          <Form.Select
+                            size="sm"
+                            value={a.className}
+                            onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
+                          >
+                            {classes.map((c) => (
+                              <option key={c.id} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </Form.Select>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
+                          {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </Button>
+                        <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                    </ListGroup.Item>
+                  ))}
+                </ListGroup>
+              )}
+            </div>
+
+            <hr />
+
+            <div style={{ marginBottom: 8 }}>
+              <h6 style={{ marginBottom: 8 }}>Classes</h6>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <InputGroup>
+                  <Form.Control
+                    ref={classInputRef}
+                    size="sm"
+                    placeholder="New class name"
+                    value={newClassName}
+                    onChange={(e) => setNewClassName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
+                  />
+                  <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
+                </InputGroup>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {classes.map((c) => (
+                  <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
+                      <div>{c.name}</div>
+                    </div>
+                    <div>
+                      <Button
+                        size="sm"
+                        variant="outline-secondary"
+                        onClick={() => {
+                          if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
+                        }}
+                      >
+                        Assign
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
+            </div>
+
+            <hr />
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <Button
+                variant="outline-secondary"
+                onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}
+              >
+                <ChevronLeft size={14} /> Prev
+              </Button>
+              <Button
+                variant="outline-secondary"
+                onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}
+              >
+                Next <ChevronRight size={14} />
+              </Button>
+              <div style={{ marginLeft: "auto", color: themeColors.subtleText, alignSelf: "center" }}>
+                {currentIdx + 1}/{images.length}
+              </div>
             </div>
           </div>
-
-          <hr />
-
-          <div style={{ display: "flex", gap: 8 }}>
-            <Button
-              variant="outline-secondary"
-              onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}
-            >
-              <ChevronLeft size={14} /> Prev
-            </Button>
-            <Button
-              variant="outline-secondary"
-              onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}
-            >
-              Next <ChevronRight size={14} />
-            </Button>
-            <div style={{ marginLeft: "auto", color: themeColors.subtleText, alignSelf: "center" }}>
-              {currentIdx + 1}/{images.length}
-            </div>
-          </div>
+        )}
+ 
         </div>
       </div>
+      <ShortcutsModal />
     </div>
   );
 }
