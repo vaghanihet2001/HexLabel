@@ -220,7 +220,7 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
         borderRadius: 12,
         padding: "2rem",
         background: dragActive ? themeColors.nodeBg : themeColors.background,
-        minHeight: "70vh",
+        // minHeight: "70vh",
         transition: "all 0.25s ease-in-out",
         filter: loading ? "blur(2px)" : "none",
         opacity: loading ? 0.9 : 1,

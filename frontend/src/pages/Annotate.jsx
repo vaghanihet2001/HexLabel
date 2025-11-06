@@ -125,6 +125,35 @@ export default function Annotate() {
     }
   }
 
+  // Helper to reset image transform and resize canvas
+  const resetImageAndCanvas = () => {
+    panRef.current = { x: 0, y: 0 };
+    setZoom(1);
+    // Resize canvas
+    if (canvasRef.current && containerRef.current) {
+      const canvas = canvasRef.current;
+      const container = containerRef.current;
+      const rect = container.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+    }
+    // Reset image transform
+    if (imageRef.current) {
+      imageRef.current.style.transform = `translate(0px, 0px) scale(1)`;
+      imageRef.current.style.transformOrigin = "center center";
+    }
+  };
+
+  // Update panel toggle handlers
+  const handleLeftPanelToggle = (open) => {
+    setLeftPanelOpen(open);
+    setTimeout(resetImageAndCanvas, 0);
+  };
+  const handleRightPanelToggle = (open) => {
+    setRightPanelOpen(open);
+    setTimeout(resetImageAndCanvas, 0);
+  };
+
   // --------------------- LOAD: dataset, job, images, classes ---------------------
   useEffect(() => {
     let mounted = true;
@@ -729,7 +758,6 @@ export default function Annotate() {
       // If hand mode (toggle) OR space pressed -> start panning
       if (handMode || spaceDownRef.current) {
         startPan(e);
-        // capture pointer moves for pan (we won't do drawing)
         return;
       }
 
@@ -756,23 +784,18 @@ export default function Annotate() {
         } else if (hit.type === "vertex") {
           stateRef.current.edit.type = "vertex";
           stateRef.current.edit.index = hit.index; // vertex index
-        } else {
+        } else if (hit.type === "inside" && ann.type === "bbox") {
+          // Enable moving bbox by dragging inside
           stateRef.current.edit.type = "move";
           stateRef.current.edit.index = null;
           // store offset between mouse client and annotation center for move
-          // compute annotation center client coords
-          if (ann.type === "bbox") {
-            const [x1, y1, x2, y2] = ann.points;
-            const cx = (x1 + x2) / 2;
-            const cy = (y1 + y2) / 2;
-            const [centx, centy] = normalizedToClient(cx, cy);
-            stateRef.current.edit.offset = [e.clientX - centx, e.clientY - centy];
-          } else if (ann.type === "poly") {
-            // centroid approximate
-            const rect = imageClientRect();
-            const c = computePolyCentroidClient(ann.points, rect);
-            stateRef.current.edit.offset = [e.clientX - c[0], e.clientY - c[1]];
-          }
+          const [x1, y1, x2, y2] = ann.points;
+          const cx = (x1 + x2) / 2;
+          const cy = (y1 + y2) / 2;
+          const [centx, centy] = normalizedToClient(cx, cy);
+          stateRef.current.edit.offset = [e.clientX - centx, e.clientY - centy];
+        } else {
+          // ...existing code for poly inside...
         }
         // start capturing pointermove/up (editing will be performed in pointermove handler)
       } else {
@@ -1367,18 +1390,27 @@ export default function Annotate() {
             variant="danger"
             size="sm"
             onClick={async () => {
-              if (!images[currentIdx]) return;
-              const imgToDelete = images[currentIdx];
-              // Remove image from images array
-              setImages((imgs) => imgs.filter((img, idx) => idx !== currentIdx));
-              // Move to previous image if possible
-              setCurrentIdx((idx) => Math.max(0, idx - 1));
-              // Optionally, delete annotations for this image from db
-              try {
-                await db.annotations.where({ datasetId: dsId, imageName: imgToDelete.name }).delete();
-              } catch (err) {
-                console.error("Failed to delete image annotations:", err);
+              const img = images[currentIdx];
+              if (!img) return;
+              if (!window.confirm("Delete this image? This will remove it from all jobs and the database.")) return;
+              // Remove image from db
+              await db.images.delete(img.id);
+              // Remove image from all jobs
+              const jobs = await db.jobs.where("imageIds").equals(img.id).toArray();
+              for (const job of jobs) {
+                const newImageIds = (job.imageIds || []).filter((id) => id !== img.id);
+                await db.jobs.update(job.id, { imageIds: newImageIds });
               }
+              // Remove annotations for this image
+              await db.annotations.where("imageName").equals(img.name).delete();
+              // Revoke object URL if present
+              if (img.url && createdUrlsRef.current.has(img.url)) {
+                try { URL.revokeObjectURL(img.url); } catch {}
+                createdUrlsRef.current.delete(img.url);
+              }
+              // Remove from images state
+              setImages((imgs) => imgs.filter((im, idx) => idx !== currentIdx));
+              setCurrentIdx((idx) => Math.max(0, idx - 1));
             }}
             title="Delete current image"
           >
@@ -1401,7 +1433,7 @@ export default function Annotate() {
                       background: themeColors.toolbarBg, 
                       borderRadius: 6, 
                       border: `1px solid ${themeColors.border}`}}
-              onClick={() => setLeftPanelOpen((open) => !open)}>
+              onClick={() => handleLeftPanelToggle(!leftPanelOpen)}>
           images <ImageIcon></ImageIcon>
         </div>
         {/* Left thumbnails */}
@@ -1418,15 +1450,6 @@ export default function Annotate() {
               position: "relative",
             }}
           >
-            {/* <Button
-              variant="outline-secondary"
-              size="sm"
-              style={{ position: "absolute", left: 8, top: 8, zIndex: 2 }}
-              onClick={() => setLeftPanelOpen(false)}
-              title="Hide sidebar"
-            >
-              <ChevronLeft size={14} />
-            </Button> */}
             <div className="d-flex justify-content-between align-items-center mb-2">
               <b>Images</b>
               <Badge bg="secondary">{images.length}</Badge>
@@ -1591,7 +1614,7 @@ export default function Annotate() {
                       background: themeColors.toolbarBg, 
                       borderRadius: 6, 
                       border: `1px solid ${themeColors.border}`}}
-            onClick={() => setRightPanelOpen((open) => !open)}>
+            onClick={() => handleRightPanelToggle(!rightPanelOpen)}>
           labels <TagIcon></TagIcon>
         </div>
         {/* Right: annotations & classes */}
@@ -1608,15 +1631,6 @@ export default function Annotate() {
               position: "relative",
             }}
           >
-            {/* <Button
-              variant="outline-secondary"
-              size="sm"
-              style={{ position: "absolute",height: '100px', left: -5, top:"50%", zIndex: 2 }}
-              onClick={() => setRightPanelOpen(false)}
-              title="Hide sidebar"
-            >
-              <ChevronRight size={14} />
-            </Button> */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <h6 style={{ margin: 0 }}>Annotations</h6>
               <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>

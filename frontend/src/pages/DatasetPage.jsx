@@ -47,6 +47,9 @@ export default function DatasetPage() {
         color: themeColors.text,
         height: "calc(100vh - 60px)",
         transition: "background-color 0.3s ease",
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.5rem",
       }}
     >
       {/* 🔙 Header */}
@@ -77,9 +80,11 @@ export default function DatasetPage() {
         className="mb-4"
         justify
         style={{
+          height: "60px",
           background: themeColors.cardBg,
           borderRadius: 8,
           padding: "0.5rem",
+          borderColor: themeColors.border,
         }}
       >
         <Tab eventKey="upload" title="📤 Upload Images">
