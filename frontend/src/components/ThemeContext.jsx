@@ -1,94 +1,95 @@
-// src/components/ThemeContext.jsx
+// src/theme/ThemeContext.jsx
 import React, { createContext, useState, useContext, useEffect } from "react";
-import { Placeholder } from "react-bootstrap";
 
-// --- Centralized color palette ---
 export const lightTheme = {
   background: "#ffffff",
   headerBg: "#f8f9fa",
   toolbarBg: "#e9ecef",
   sidebarBg: "#f1f3f5",
+
   text: "#212529",
-  border: "#dee2e6",
-  nodeBg: "#e3f2fd",
-  edgeColor: "#000000",
+  subtleText: "#6b7280",
+  placeholderText: "#6b7280",
+
   cardBg: "#ffffff",
-  surface: "#ffffff",
+  surface: "#eeeeee",
+  border: "#dee2e6",
+
   inputBg: "#ffffff",
   inputText: "#212529",
-  subtleText: "#6b7280",
-  placeholderText: "#212529",
+
   buttonBg: "#ffffff",
   buttonText: "#212529",
   hoverBg: "#e9ecef",
 
-  // 🔵 Added for better UI consistency
-  primary: "#4f46e5",
-  accent: "#6366f1",
+  primary: "#0066cc",
+  accent: "#33ccff",
   link: "#4f8cff",
   error: "#ff4d4d",
-  googleBtnBg: "#ffffff",
-  googleBtnText: "#333333",
-  shadow: "rgba(0, 0, 0, 0.15)",
-};
 
+  shadow: "rgba(22, 10, 122, 0.30)",
+};
 
 export const darkTheme = {
   background: "#121212",
   headerBg: "#1e1e1e",
   toolbarBg: "#2c2c2c",
   sidebarBg: "#252525",
+
   text: "#ffffff",
-  border: "#333333",
-  nodeBg: "#2b2b2b",
-  edgeColor: "#ffffff",
-  cardBg: "#2c2c2c",
+  subtleText: "#94a3b8",
+  placeholderText: "#aaaaaa",
+
+  cardBg: "#1e1e1e",
   surface: "#2b2b3d",
+  border: "#444444",
+
   inputBg: "#2c2c2c",
   inputText: "#ffffff",
-  subtleText: "#94a3b8",
-  placeholderText: "#ffffff",
-  buttonBg: "#2c2c2c",
-  buttonText: "#ffffff",
-  hoverBg: "#3a3a3a",
 
-  // 🟣 Added theme-aware properties for login and UI cards
-  primary: "#6366f1",
-  accent: "#818cf8",
-  link: "#4f8cff",
+  buttonBg: "#2e2e2e",
+  buttonText: "#ffffff",
+  hoverBg: "#3d3d3d",
+
+  primary: "#3388ff",
+  accent: "#55aaff",
+  link: "#6aa8ff",
   error: "#ff6b6b",
-  googleBtnBg: "#3a3a4f",
-  googleBtnText: "#f5f5f5",
-  shadow: "rgba(0, 0, 0, 0.4)",
+
+  shadow: "rgba(0,0,0,0.40)",
 };
 
-
-// --- Theme Context ---
 const ThemeContext = createContext();
 
 export const ThemeProvider = ({ children }) => {
   const [theme, setTheme] = useState("dark");
+  const themeColors = theme === "light" ? lightTheme : darkTheme;
 
-  // Load saved theme from localStorage on mount
+  // Load saved theme
   useEffect(() => {
-    const savedTheme = localStorage.getItem("app-theme");
-    if (savedTheme === "light" || savedTheme === "dark") {
-      setTheme(savedTheme);
-    }
+    const saved = localStorage.getItem("app-theme");
+    if (saved) setTheme(saved);
   }, []);
 
-  // Save theme to localStorage whenever it changes
+  // Save theme
   useEffect(() => {
     localStorage.setItem("app-theme", theme);
   }, [theme]);
 
-  // Toggle theme
-  const toggleTheme = () => {
-    setTheme((prev) => (prev === "light" ? "dark" : "light"));
-  };
+  // Inject CSS variables globally
+  useEffect(() => {
+    const root = document.documentElement;
 
-  // Current theme colors
-  const themeColors = theme === "light" ? lightTheme : darkTheme;
+    Object.entries(themeColors).forEach(([key, value]) => {
+      root.style.setProperty(`--${key}`, value);
+    });
+
+    root.style.setProperty("--scroll-primary", themeColors.primary);
+    root.style.setProperty("--scroll-accent", themeColors.accent);
+  }, [themeColors]);
+
+  const toggleTheme = () =>
+    setTheme((prev) => (prev === "light" ? "dark" : "light"));
 
   return (
     <ThemeContext.Provider value={{ theme, toggleTheme, themeColors }}>
@@ -97,5 +98,4 @@ export const ThemeProvider = ({ children }) => {
   );
 };
 
-// --- Custom hook for using theme ---
 export const useTheme = () => useContext(ThemeContext);

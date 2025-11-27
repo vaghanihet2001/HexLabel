@@ -8,6 +8,7 @@ import {
   FaSun,
   FaMoon,
   FaUserCircle,
+  FaGlobe,
 } from "react-icons/fa";
 import "bootstrap/dist/css/bootstrap.min.css";
 import { useTheme } from "./ThemeContext";
@@ -27,6 +28,7 @@ const Header = () => {
     github: "https://github.com/vaghanihet2001",
     linkedin: "https://www.linkedin.com/in/ai-ml-developer",
     email: "vaghanihet2001@gmail.com",
+    website: "https://hexverce.in/",
   };
 
   const buttonStyle = {
@@ -61,7 +63,11 @@ const Header = () => {
           className="img-fluid"
           style={{ height: "40px" }}
         />
-        <span className="fw-bold fs-5">HexLabel</span>
+        <span className="fw-bold fs-3" style={{
+          background: `linear-gradient(90deg, ${themeColors.primary}, ${themeColors.accent})`,
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+        }}>HexLabel</span>
       </div>
 
       {/* Right side buttons */}
@@ -114,6 +120,13 @@ const Header = () => {
                     style={{ color: themeColors.text }}
                   >
                     <FaEnvelope /> Email
+                  </a>
+                  <a
+                    href={`${developerInfo.website}`}
+                    className="d-flex align-items-center text-decoration-none gap-2"
+                    style={{ color: themeColors.text }}
+                  >
+                    <FaGlobe /> Hexverce Website
                   </a>
                 </div>
               </div>

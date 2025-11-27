@@ -1,3 +1,4 @@
+// src/pages/ProjectPage.jsx
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
@@ -7,12 +8,13 @@ import {
   Col,
   OverlayTrigger,
   Tooltip,
-  Modal,
   Form,
 } from "react-bootstrap";
 import { Database, FolderOpen, Plus, Trash2, Lock } from "lucide-react";
 import { useTheme } from "../components/ThemeContext";
+import AppModal from "../components/AppModal";
 import { db, generateId } from "../utils/db";
+import * as fsUtils from "../utils/fs";
 
 export default function ProjectPage() {
   const { projectId } = useParams();
@@ -21,15 +23,40 @@ export default function ProjectPage() {
 
   const [project, setProject] = useState(null);
   const [datasets, setDatasets] = useState([]);
+
+  // modal state for global app modal
+  const [modal, setModal] = useState({
+    show: false,
+    type: "info",
+    title: "",
+    message: "",
+    confirmText: "OK",
+    cancelText: "Cancel",
+    onConfirm: null,
+    autoClose: false,
+  });
+
+  const openModal = (data) =>
+    setModal({
+      show: true,
+      type: data.type || "info",
+      title: data.title || "",
+      message: data.message || "",
+      confirmText: data.confirmText || "OK",
+      cancelText: data.cancelText || "Cancel",
+      onConfirm: data.onConfirm || null,
+      autoClose: data.autoClose || false,
+    });
+
+  const closeModal = () => setModal((prev) => ({ ...prev, show: false, onConfirm: null }));
+
   const [showAdd, setShowAdd] = useState(false);
   const [newDatasetName, setNewDatasetName] = useState("");
+  const [newDatasetType, setNewDatasetType] = useState("detect");
+  const [newDatasetDescription, setNewDatasetDescription] = useState("");
   const [hasPermission, setHasPermission] = useState(true);
 
-  // delete modal states
-  const [showDelete, setShowDelete] = useState(false);
-  const [datasetToDelete, setDatasetToDelete] = useState(null);
-
-  /** 🔄 Load project and datasets */
+  // load project and datasets (from DB or disk)
   useEffect(() => {
     const load = async () => {
       const proj = await db.projects.get(projectId);
@@ -39,240 +66,231 @@ export default function ProjectPage() {
       }
       setProject(proj);
 
-      const sets = await db.datasets.where("projectId").equals(projectId).toArray();
-      setDatasets(sets);
-
-      // Check folder permission
+      // try to sync from disk (if folderHandle present)
       if (proj.folderHandle) {
         try {
-          const state = await proj.folderHandle.queryPermission({
-            mode: "readwrite",
-          });
+          await fsUtils.syncProjectToIndexedDB(proj.folderHandle, true);
+          const sets = await db.datasets.where("projectId").equals(projectId).toArray();
+          setDatasets(sets);
+        } catch (err) {
+          // fallback to DB datasets
+          const sets = await db.datasets.where("projectId").equals(projectId).toArray();
+          setDatasets(sets);
+        }
+
+        try {
+          const state = await proj.folderHandle.queryPermission({ mode: "readwrite" });
           setHasPermission(state === "granted");
         } catch {
           setHasPermission(false);
         }
       } else {
+        const sets = await db.datasets.where("projectId").equals(projectId).toArray();
+        setDatasets(sets);
         setHasPermission(false);
       }
     };
     load();
   }, [projectId]);
 
-  /** 🔐 Request folder permission again */
+  // request permission
   const handleGrantPermission = async () => {
     if (!project?.folderHandle) {
-      alert("Project folder not available. Re-select project folder in Projects page.");
-      return;
+      return openModal({
+        type: "error",
+        title: "Missing Folder",
+        message: "Project folder not found. Re-select project in Projects page.",
+      });
     }
     try {
-      const perm = await project.folderHandle.requestPermission({
-        mode: "readwrite",
-      });
+      const perm = await project.folderHandle.requestPermission({ mode: "readwrite" });
       setHasPermission(perm === "granted");
-      if (perm !== "granted") alert("Permission not granted.");
+      if (perm !== "granted") openModal({ type: "error", title: "Permission Denied", message: "Write permission not granted." });
     } catch (err) {
-      console.error(err);
-      alert("Permission request failed.");
-      setHasPermission(false);
+      openModal({ type: "error", title: "Permission Error", message: "Failed to request permission." });
     }
   };
 
-  /** ➕ Add Dataset */
-  const handleAddDataset = async (e) => {
-    e.preventDefault();
+  // add dataset
+  const handleAddDataset = async () => {
     if (!newDatasetName.trim()) {
-      alert("Please enter a dataset name.");
-      return;
-    }
-    if (!project?.folderHandle) {
-      alert("Project folder missing. Recreate project or reselect folder.");
-      return;
+      return openModal({
+        type: "error",
+        title: "Name Required",
+        message: "Enter a dataset name."
+      });
     }
 
-    let state = await project.folderHandle.queryPermission({ mode: "readwrite" });
-    if (state !== "granted")
-      state = await project.folderHandle.requestPermission({ mode: "readwrite" });
-    if (state !== "granted") {
-      alert("Write permission required. Click 'Grant Folder Access' first.");
+    if (!project?.folderHandle) {
+      return openModal({
+        type: "error",
+        title: "Missing Folder",
+        message: "Project folder missing."
+      });
+    }
+
+    let perm = await project.folderHandle.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted")
+      perm = await project.folderHandle.requestPermission({ mode: "readwrite" });
+
+    if (perm !== "granted") {
       setHasPermission(false);
-      return;
+      return openModal({
+        type: "error",
+        title: "Permission Required",
+        message: "Write permission required to create dataset."
+      });
     }
 
     try {
-      const datasetId = generateId(); // 🆕 string-based unique ID
-      const dsFolder = await project.folderHandle.getDirectoryHandle(newDatasetName, {
-        create: true,
-      });
-
-      await db.datasets.add({
+      const datasetId = generateId();
+      const datasetMeta = {
         id: datasetId,
         name: newDatasetName,
+        description: newDatasetDescription || "",
+        type: newDatasetType || "detect",
         projectId: projectId,
-        folderHandle: dsFolder,
         createdAt: new Date().toISOString(),
+        imageCount: 0,
+        annotationVersions: [],
+      };
+
+      // create folders
+      await fsUtils.createDatasetFolderStructure(project.folderHandle, datasetMeta);
+
+      // update project metadata
+      await fsUtils.addDatasetToProjectMeta(project.folderHandle, {
+        id: datasetMeta.id,
+        name: datasetMeta.name,
+        description: datasetMeta.description,
+        type: datasetMeta.type,
+        createdAt: datasetMeta.createdAt,
+        imageCount: 0,
+      });
+
+      // add to IndexedDB
+      await db.datasets.add({
+        ...datasetMeta,
+        folderHandle: await project.folderHandle.getDirectoryHandle(newDatasetName),
       });
 
       const updated = await db.datasets.where("projectId").equals(projectId).toArray();
       setDatasets(updated);
+
+      openModal({
+        type: "success",
+        title: "Dataset Created",
+        message: `"${newDatasetName}" created successfully.`,
+        autoClose: true
+      });
+
       setShowAdd(false);
       setNewDatasetName("");
+      setNewDatasetDescription("");
+      setNewDatasetType("detect");
+
     } catch (err) {
       console.error("Failed to create dataset:", err);
-      alert("Failed to create dataset. Please check folder permissions and try again.");
+      openModal({
+        type: "error",
+        title: "Failed",
+        message: "Could not create dataset. Check permissions."
+      });
     }
   };
 
-  /** 🧹 Delete ALL data related to a dataset */
-  const handleConfirmDeleteDataset = async () => {
-    if (!datasetToDelete) return;
-    try {
-      const datasetId = datasetToDelete.id;
-
-      // 1️⃣ Delete dataset folder from file system
-      if (project?.folderHandle) {
+  // delete dataset
+  const openDeleteDatasetModal = (dataset) => {
+    openModal({
+      type: "confirm",
+      title: "Delete Dataset?",
+      message: `Delete "${dataset.name}" and all its data?`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
         try {
-          await project.folderHandle.removeEntry(datasetToDelete.name, {
-            recursive: true,
-          });
-          console.log("✅ Deleted folder:", datasetToDelete.name);
+          // delete dataset folder
+          if (project.folderHandle) {
+            try {
+              await project.folderHandle.removeEntry(dataset.name, { recursive: true });
+            } catch (err) {
+              // ignore
+            }
+          }
+
+          // delete DB entries
+          await Promise.all([
+            db.images.where("datasetId").equals(dataset.id).delete(),
+            db.tempImages.where("datasetId").equals(dataset.id).delete(),
+            db.annotations.where("datasetId").equals(dataset.id).delete(),
+            db.jobs.where("datasetId").equals(dataset.id).delete(),
+            db.datasetVersions.where("datasetId").equals(dataset.id).delete(),
+            db.datasets.delete(dataset.id),
+          ]);
+
+          // update project.json
+          try {
+            await fsUtils.removeDatasetFromProjectMeta(project.folderHandle, dataset.id);
+          } catch (err) {
+            // ignore
+          }
+
+          // refresh UI
+          const updated = await db.datasets.where("projectId").equals(projectId).toArray();
+          setDatasets(updated);
+          return true;
         } catch (err) {
-          console.warn("⚠️ Could not delete dataset folder:", err);
+          openModal({ type: "error", title: "Delete Failed", message: "Could not delete dataset." });
+          return false;
         }
-      }
-
-      // 2️⃣ Delete all related entries in Dexie
-      await Promise.all([
-        db.images.where("datasetId").equals(datasetId).delete(),
-        db.jobs.where("datasetId").equals(datasetId).delete(),
-        db.annotations.where("datasetId").equals(datasetId).delete(),
-        db.tempImages.where("datasetId").equals(datasetId).delete(),
-        db.datasetVersions.where("datasetId").equals(datasetId).delete(),
-        db.datasets.delete(datasetId),
-      ]);
-
-      console.log(`🧽 Deleted dataset ${datasetId} and all related records`);
-
-      // 3️⃣ Refresh dataset list
-      const updated = await db.datasets.where("projectId").equals(projectId).toArray();
-      setDatasets(updated);
-
-      setShowDelete(false);
-      setDatasetToDelete(null);
-    } catch (err) {
-      console.error("❌ Failed to delete dataset:", err);
-      alert("Failed to delete dataset and related data.");
-    }
+      },
+      autoClose: true,
+    });
   };
 
-  const openDeleteModal = (ds) => {
-    setDatasetToDelete(ds);
-    setShowDelete(true);
-  };
-
-  if (!project)
-    return (
-      <div className="p-4" style={{ color: themeColors.text }}>
-        Project not found or loading...
-      </div>
-    );
-
-  const cardStyle = {
-    backgroundColor: themeColors.cardBg,
-    color: themeColors.text,
-    border: `1px solid ${themeColors.border}`,
-    borderRadius: "12px",
-  };
-
-  const placeholderStyle = {
-    width: "100%",
-    height: "140px",
-    borderRadius: "10px",
-    backgroundColor: themeColors.toolbarBg,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    color: themeColors.placeholderText,
-    fontSize: "0.9rem",
-  };
+  if (!project) return <div className="p-4" style={{ color: themeColors.text }}>Project not found.</div>;
 
   return (
-    <div
-      className="p-4"
-      style={{
-        backgroundColor: themeColors.background,
-        color: themeColors.text,
-      }}
-    >
-      {/* HEADER */}
+    <div className="p-4">
+      {/* Global AppModal */}
+      <AppModal {...modal} show={modal.show} onClose={closeModal} />
+
+      {/* Header */}
       <div className="d-flex justify-content-between align-items-center mb-4">
         <div className="d-flex align-items-center">
-          <Button
-            variant="outline-secondary"
-            className="me-3"
-            onClick={() => navigate("/projects")}
-          >
-            ← Back
-          </Button>
+          <Button variant="outline-secondary" className="me-3" onClick={() => navigate("/projects")}>← Back</Button>
           <h2 className="fw-semibold mb-0">{project.name}</h2>
         </div>
 
         {hasPermission ? (
-          <Button variant="primary" onClick={() => setShowAdd(true)}>
-            <Plus size={16} className="me-1" /> Add Dataset
-          </Button>
+          <Button variant="primary" onClick={() => setShowAdd(true)}><Plus size={16} className="me-1" /> Add Dataset</Button>
         ) : (
-          <Button variant="warning" onClick={handleGrantPermission}>
-            <Lock size={14} className="me-1" /> Grant Folder Access
-          </Button>
+          <Button variant="warning" onClick={handleGrantPermission}><Lock size={16} className="me-1" /> Grant Folder Access</Button>
         )}
       </div>
 
-      <p style={{ color: themeColors.subtleText }} className="mb-4">
-        {project.description}
-      </p>
+      <p style={{ color: themeColors.subtleText }}>{project.description}</p>
 
-      {/* DATASET GRID */}
+      {/* dataset grid */}
       {datasets.length === 0 ? (
-        <p style={{ opacity: 0.7, color: themeColors.subtleText }}>
-          No datasets yet.
-        </p>
+        <p style={{ color: themeColors.subtleText }}>No datasets found.</p>
       ) : (
         <Row xs={1} sm={2} md={3} lg={4} className="g-4">
           {datasets.map((ds) => (
             <Col key={ds.id}>
-              <Card style={cardStyle} className="p-2 h-100">
-                <div style={placeholderStyle}>
+              <Card className="p-2 h-100" style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}>
+                <div className="d-flex align-items-center justify-content-center" style={{ height: 140, background: themeColors.toolbarBg, borderRadius: 10 }}>
                   <FolderOpen size={20} />
                 </div>
-                <Card.Body className="pt-2">
+
+                <Card.Body>
                   <h5 className="mb-1">{ds.name}</h5>
-                  <p className="mb-2 small" style={{ color: themeColors.subtleText }}>
-                    {new Date(ds.createdAt).toLocaleString()}
-                  </p>
+                  <p className="small" style={{ color: themeColors.subtleText }}>{ds.type || "detect"}</p>
+                  <p className="small" style={{ color: themeColors.subtleText }}>{ds.createdAt ? new Date(ds.createdAt).toLocaleString() : ""}</p>
 
                   <div className="d-flex justify-content-between">
-                    <OverlayTrigger placement="top" overlay={<Tooltip>Open</Tooltip>}>
-                      <Button
-                        variant="outline-primary"
-                        size="sm"
-                        onClick={() =>
-                          navigate(`/project/${projectId}/dataset/${ds.id}`)
-                        }
-                      >
-                        <Database size={14} />
-                      </Button>
-                    </OverlayTrigger>
-
-                    <OverlayTrigger placement="top" overlay={<Tooltip>Delete</Tooltip>}>
-                      <Button
-                        variant="outline-danger"
-                        size="sm"
-                        onClick={() => openDeleteModal(ds)}
-                      >
-                        <Trash2 size={14} />
-                      </Button>
-                    </OverlayTrigger>
+                    <Button size="sm" variant="outline-primary" onClick={() => navigate(`/project/${projectId}/dataset/${ds.id}`)}><Database size={14} /></Button>
+                    <Button size="sm" variant="outline-danger" onClick={() => openDeleteDatasetModal(ds)}><Trash2 size={14} /></Button>
                   </div>
                 </Card.Body>
               </Card>
@@ -281,65 +299,44 @@ export default function ProjectPage() {
         </Row>
       )}
 
-      {/* ➕ Add Dataset Modal */}
-      <Modal show={showAdd} onHide={() => setShowAdd(false)} centered>
-        <Modal.Header
-          closeButton
-          style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}
-        >
-          <Modal.Title>Add Dataset</Modal.Title>
-        </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.background }}>
-          <Form onSubmit={handleAddDataset}>
-            <Form.Group className="mb-3">
-              <Form.Label style={{ color: themeColors.text }}>Dataset Name</Form.Label>
-              <Form.Control
-                type="text"
-                value={newDatasetName}
-                onChange={(e) => setNewDatasetName(e.target.value)}
-                required
-                style={{
-                  backgroundColor: themeColors.inputBg,
-                  color: themeColors.inputText,
-                  border: `1px solid ${themeColors.border}`,
-                }}
-              />
-            </Form.Group>
+      {/* Add dataset modal (uses AppModal for confirm; we use showAdd state to toggle) */}
+      {showAdd && (
+        <AppModal
+          show={showAdd}
+          onClose={() => setShowAdd(false)}
+          title="Create Dataset"
+          type="confirm"
+          confirmText="Create"
+          cancelText="Cancel"
+          onConfirm={handleAddDataset}
+          autoClose={false}
+          message={
+            // we pass a small HTML string or React fragment — AppModal renders message directly so it'll accept JSX
+            <div>
+              <Form.Group className="mb-2">
+                <Form.Label>Name</Form.Label>
+                <Form.Control value={newDatasetName} onChange={(e) => setNewDatasetName(e.target.value)} />
+              </Form.Group>
 
-            <div className="d-flex justify-content-end">
-              <Button variant="secondary" className="me-2" onClick={() => setShowAdd(false)}>
-                Cancel
-              </Button>
-              <Button variant="primary" type="submit">
-                Save Dataset
-              </Button>
+              <Form.Group className="mb-2">
+                <Form.Label>Description</Form.Label>
+                <Form.Control as="textarea" rows={2} value={newDatasetDescription} onChange={(e) => setNewDatasetDescription(e.target.value)} />
+              </Form.Group>
+
+              <Form.Group>
+                <Form.Label>Type</Form.Label>
+                <Form.Select value={newDatasetType} onChange={(e) => setNewDatasetType(e.target.value)}>
+                  <option value="detect">Detection</option>
+                  <option value="segment">Segmentation</option>
+                  <option value="obb">OBB</option>
+                  <option value="classify">Classification</option>
+                  <option value="ocr">OCR</option>
+                </Form.Select>
+              </Form.Group>
             </div>
-          </Form>
-        </Modal.Body>
-      </Modal>
-
-      {/* 🗑️ Delete Confirmation Modal */}
-      <Modal show={showDelete} onHide={() => setShowDelete(false)} centered>
-        <Modal.Header
-          closeButton
-          style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}
-        >
-          <Modal.Title>Confirm Deletion</Modal.Title>
-        </Modal.Header>
-        <Modal.Body style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}>
-          Are you sure you want to delete the dataset{" "}
-          <strong>{datasetToDelete?.name}</strong>?<br />
-          This will permanently remove its folder and all related records.
-        </Modal.Body>
-        <Modal.Footer style={{ backgroundColor: themeColors.cardBg }}>
-          <Button variant="secondary" onClick={() => setShowDelete(false)}>
-            Cancel
-          </Button>
-          <Button variant="danger" onClick={handleConfirmDeleteDataset}>
-            Delete
-          </Button>
-        </Modal.Footer>
-      </Modal>
+          }
+        />
+      )}
     </div>
   );
 }

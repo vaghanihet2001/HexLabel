@@ -1,10 +1,17 @@
+// frontend/src/pages/dataset/UploadImagesPage.jsx
 import React, { useState, useEffect, useRef } from "react";
 import { Button, Card, Row, Col, Form, Spinner } from "react-bootstrap";
 import { db } from "../../utils/db";
 import { useTheme } from "../../components/ThemeContext";
 import { CheckSquare, Square, UploadCloud } from "lucide-react";
 
-export default function UploadImagesPage({ datasetId, onJobCreated }) {
+export default function UploadImagesPage({
+  dataset,
+  project,
+  datasetId,
+  projectId,
+  onJobCreated,
+}) {
   const { themeColors, theme } = useTheme();
 
   const [images, setImages] = useState([]);
@@ -14,79 +21,83 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
   const [statusText, setStatusText] = useState("Loading...");
   const createdUrlsRef = useRef(new Set());
 
-  // 🧠 Load temp images from IndexedDB
+  // ----------------------------------------
+  // LOAD TEMP IMAGES (REFRESH-PROOF)
+  // ----------------------------------------
   useEffect(() => {
     let mounted = true;
-    const loadImages = async () => {
+    const load = async () => {
       setLoading(true);
       try {
         const stored = await db.tempImages
-          ?.where("datasetId")
+          .where("datasetId")
           .equals(datasetId)
           .toArray();
 
         const mapped = stored.map((it) => ({
           ...it,
-          url: it.url || URL.createObjectURL(it.blob), // recreate preview URL if missing
+          url: it.url || URL.createObjectURL(it.blob),
         }));
 
         mapped.forEach((m) => createdUrlsRef.current.add(m.url));
+
         if (mounted) setImages(mapped);
       } catch (err) {
-        console.error("Failed to load temp images:", err);
+        console.error("❌ Failed to load temp images:", err);
       } finally {
-        if (mounted) {
-          setLoading(false);
-          setStatusText("");
-        }
+        setLoading(false);
+        setStatusText("");
       }
     };
-    loadImages();
+    load();
     return () => (mounted = false);
   }, [datasetId]);
 
-  // 🖼️ Upload images → store as blob in tempImages (with UUID filenames)
+  // ----------------------------------------
+  // UPLOAD FILES
+  // ----------------------------------------
   const handleFiles = async (files) => {
-    const imageFiles = Array.from(files).filter(file => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) return alert("No valid images selected");
+    const valid = Array.from(files).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (valid.length === 0) return alert("No valid image selected.");
+
     setLoading(true);
-    setStatusText("Uploading images...");
+    setStatusText("Uploading...");
 
     const newImages = [];
-    try {
-      for (const file of files) {
-        const id = crypto.randomUUID();
-        const extIndex = file.name.lastIndexOf(".");
-        const ext = extIndex !== -1 ? file.name.slice(extIndex) : "";
-        const blob = new Blob([await file.arrayBuffer()], { type: file.type });
-        const url = URL.createObjectURL(blob);
-        createdUrlsRef.current.add(url);
 
-        const img = {
-          id,
-          datasetId,
-          name: `${id}${ext}`, // file stored with image ID
-          originalName: file.name,
-          blob,
-          url,
-          uploadedAt: new Date().toISOString(),
-        };
+    for (const file of valid) {
+      const id = crypto.randomUUID();
+      const ext = file.name.includes(".")
+        ? file.name.substring(file.name.lastIndexOf("."))
+        : "";
+      const blob = new Blob([await file.arrayBuffer()], { type: file.type });
+      const url = URL.createObjectURL(blob);
+      createdUrlsRef.current.add(url);
 
-        await db.tempImages.put(img);
-        newImages.push(img);
-      }
+      const img = {
+        id,
+        datasetId,
+        name: `${id}${ext}`,
+        originalName: file.name,
+        blob,
+        url,
+        createdAt: new Date().toISOString(),
+      };
 
-      setImages((prev) => [...prev, ...newImages]);
-    } catch (err) {
-      console.error("Image upload failed:", err);
-      alert("Failed to upload images.");
-    } finally {
-      setLoading(false);
-      setStatusText("");
+      await db.tempImages.put(img);
+      newImages.push(img);
     }
+
+    setImages((prev) => [...prev, ...newImages]);
+    setLoading(false);
+    setStatusText("");
   };
 
-  // 🖱️ Drag & Drop
+  // ----------------------------------------
+  // DRAG & DROP
+  // ----------------------------------------
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -101,105 +112,98 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     if (e.dataTransfer.files?.length > 0) handleFiles(e.dataTransfer.files);
   };
 
-  // 🧩 Selection logic
+  // ----------------------------------------
+  // SELECTION
+  // ----------------------------------------
   const toggleSelect = (id) =>
-    setSelected((prev) => {
-      const copy = new Set(prev);
-      copy.has(id) ? copy.delete(id) : copy.add(id);
-      return copy;
+    setSelected((p) => {
+      const s = new Set(p);
+      s.has(id) ? s.delete(id) : s.add(id);
+      return s;
     });
 
   const selectAll = () => setSelected(new Set(images.map((i) => i.id)));
   const clearSelection = () => setSelected(new Set());
 
-  // 🗑️ Delete selected temp images
+  // ----------------------------------------
+  // DELETE SELECTED
+  // ----------------------------------------
   const deleteSelected = async () => {
     if (selected.size === 0) return;
-    if (!confirm("Delete selected uploaded images?")) return;
-    setLoading(true);
-    try {
-      for (const id of selected) await db.tempImages.delete(id);
-      setImages((prev) => prev.filter((i) => !selected.has(i.id)));
-      setSelected(new Set());
-    } catch (err) {
-      console.error("Delete failed:", err);
-    } finally {
-      setLoading(false);
-    }
+    if (!confirm("Delete selected images?")) return;
+
+    for (const id of selected) await db.tempImages.delete(id);
+
+    setImages((prev) => prev.filter((i) => !selected.has(i.id)));
+    clearSelection();
   };
 
-  // 🧹 Clear all temp images
   const clearAll = async () => {
-    if (!confirm("Clear all uploaded images?")) return;
-    setLoading(true);
-    try {
-      await db.tempImages.where("datasetId").equals(datasetId).delete();
-      setImages([]);
-      setSelected(new Set());
-    } catch (err) {
-      console.error("Clear failed:", err);
-    } finally {
-      setLoading(false);
-    }
+    if (!confirm("Delete ALL uploaded images?")) return;
+
+    await db.tempImages.where("datasetId").equals(datasetId).delete();
+    setImages([]);
+    clearSelection();
   };
 
-  // 🚀 Create Annotation Job (copy from tempImages → images)
+  // ----------------------------------------
+  // CREATE JOB
+  // ----------------------------------------
   const createJob = async () => {
-    if (selected.size === 0) return alert("Select at least one image first.");
+    if (selected.size === 0) return alert("Select at least one image.");
+
     setLoading(true);
-    setStatusText("Creating annotation job...");
+    setStatusText("Creating Job...");
 
     try {
-      const dataset = await db.datasets.get(datasetId);
-      if (!dataset?.folderHandle)
-        throw new Error("Dataset folder not selected by user.");
-
-      // 📁 Ensure raw_images folder exists
+      // ensure folder exists
       const rawFolderHandle = await dataset.folderHandle.getDirectoryHandle(
         "raw_images",
         { create: true }
       );
-      const imageIds = [];
+
+      const jobImageIds = [];
 
       for (const id of selected) {
-        const imgRec = await db.tempImages.get(id);
-        if (!imgRec?.blob) continue;
+        const img = await db.tempImages.get(id);
+        if (!img) continue;
 
-        const targetHandle = await rawFolderHandle.getFileHandle(imgRec.name, {
+        const fileHandle = await rawFolderHandle.getFileHandle(img.name, {
           create: true,
         });
-        const writable = await targetHandle.createWritable();
-        await writable.write(await imgRec.blob.arrayBuffer());
+        const writable = await fileHandle.createWritable();
+        await writable.write(await img.blob.arrayBuffer());
         await writable.close();
 
-        const newImage = {
-          id: imgRec.id, // keep the same UUID for consistency
+        await db.images.put({
+          id: img.id,
           datasetId,
-          jobId: null,
-          name: imgRec.name,
-          originalName: imgRec.originalName,
-          path: `raw_images/${imgRec.name}`,
+          name: img.name,
+          originalName: img.originalName,
+          path: `raw_images/${img.name}`,
           createdAt: new Date().toISOString(),
-        };
-        await db.images.put(newImage);
-        imageIds.push(newImage.id);
+          jobId: null,
+        });
+
+        jobImageIds.push(img.id);
       }
 
-      // 🧩 Create job entry
+      // create job record
       const job = {
         id: crypto.randomUUID(),
         datasetId,
         name: `Job - ${new Date().toLocaleString()}`,
-        imageIds,
         status: "not_started",
+        imageIds: jobImageIds,
         createdAt: new Date().toISOString(),
       };
+
       await db.jobs.add(job);
 
-      alert("✅ Job created successfully!");
-      if (onJobCreated) onJobCreated();
+      alert("Job created successfully.");
+      onJobCreated && onJobCreated();
     } catch (err) {
-      console.error("Job creation failed:", err);
+      console.error("❌ createJob failed:", err);
       alert("Failed to create job.");
     } finally {
       setLoading(false);
@@ -207,7 +211,9 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
     }
   };
 
-  // 🎨 UI
+  // ----------------------------------------
+  // UI
+  // ----------------------------------------
   return (
     <div
       onDragEnter={handleDrag}
@@ -216,16 +222,14 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
       onDrop={handleDrop}
       style={{
         position: "relative",
-        border: dragActive ? "2px dashed #4f46e5" : "2px dashed #ccc",
+        border: dragActive ? "2px dashed #4f46e5" : "2px dashed #aaa",
         borderRadius: 12,
         padding: "2rem",
-        background: dragActive ? themeColors.nodeBg : themeColors.background,
-        // minHeight: "70vh",
-        transition: "all 0.25s ease-in-out",
-        filter: loading ? "blur(2px)" : "none",
-        opacity: loading ? 0.9 : 1,
+        background: themeColors.background,
+        transition: "0.25s",
       }}
     >
+      {/* LOADING OVERLAY */}
       {loading && (
         <div
           style={{
@@ -235,133 +239,109 @@ export default function UploadImagesPage({ datasetId, onJobCreated }) {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            backgroundColor:
-              theme === "dark"
-                ? "rgba(0,0,0,0.65)"
-                : "rgba(255,255,255,0.75)",
+            background: theme === "dark" ? "rgba(0,0,0,0.6)" : "#ffffffcc",
             zIndex: 20,
-            borderRadius: 12,
-            backdropFilter: "blur(4px)",
           }}
         >
-          <Spinner
-            animation="border"
-            role="status"
-            variant={theme === "dark" ? "light" : "dark"}
-          />
-          <div style={{ marginTop: "1rem", color: themeColors.text, fontWeight: 500 }}>
+          <Spinner animation="border" />
+          <div style={{ marginTop: 10, color: themeColors.text }}>
             {statusText}
           </div>
         </div>
       )}
 
-      {/* Upload Box */}
+      {/* Upload box */}
       <div className="text-center mb-4">
         <h5 style={{ color: themeColors.text }}>
-          <UploadCloud size={20} className="me-2" />
-          Drag & drop images here or click below to upload
+          <UploadCloud size={20} /> Drag & drop images or select files
         </h5>
-        <Form.Group controlId="formFile" className="mt-3">
-          <Form.Control
-            type="file"
-            multiple
-            accept="image/*"
-            onChange={(e) => handleFiles(e.target.files)}
-            style={{ maxWidth: 300, margin: "0 auto" }}
-          />
-        </Form.Group>
+        <Form.Control
+          type="file"
+          multiple
+          accept="image/*"
+          style={{ width: 300, margin: "1rem auto" }}
+          onChange={(e) => handleFiles(e.target.files)}
+        />
       </div>
 
+      {/* Toolbar */}
       {images.length > 0 && (
-        <>
-          {/* Toolbar */}
-          <div
-            className="d-flex justify-content-between align-items-center mb-3"
-            style={{
-              background: themeColors.toolbarBg,
-              padding: "0.75rem 1rem",
-              borderRadius: 8,
-              boxShadow: `0 1px 3px ${themeColors.shadow}`,
-            }}
-          >
-            <div className="d-flex align-items-center gap-2">
-              <Button size="sm" variant="outline-secondary" onClick={selectAll}>
-                Select All
-              </Button>
-              <Button size="sm" variant="outline-secondary" onClick={clearSelection}>
-                Clear Selection
-              </Button>
-              <Button size="sm" variant="outline-danger" onClick={deleteSelected}>
-                Delete Selected
-              </Button>
-              <Button size="sm" variant="outline-danger" onClick={clearAll}>
-                Clear All
-              </Button>
-            </div>
-            <Button size="sm" variant="primary" onClick={createJob}>
-              Create Annotation Job
+        <div
+          className="d-flex justify-content-between align-items-center mb-3"
+          style={{
+            background: themeColors.toolbarBg,
+            padding: "0.75rem 1rem",
+            borderRadius: 8,
+          }}
+        >
+          <div className="d-flex gap-2">
+            <Button size="sm" variant="outline-secondary" onClick={selectAll}>
+              Select All
+            </Button>
+            <Button size="sm" variant="outline-secondary" onClick={clearSelection}>
+              Clear Selection
+            </Button>
+            <Button size="sm" variant="outline-danger" onClick={deleteSelected}>
+              Delete Selected
+            </Button>
+            <Button size="sm" variant="outline-danger" onClick={clearAll}>
+              Clear All
             </Button>
           </div>
 
-          {/* Image Grid */}
-          <Row xs={2} sm={3} md={4} lg={5} className="g-3">
-            {images.map((img) => (
-              <Col key={img.id}>
-                <Card
-                  style={{
-                    position: "relative",
-                    background: themeColors.cardBg,
-                    color: themeColors.text,
-                    border: selected.has(img.id)
-                      ? `2px solid ${themeColors.primary}`
-                      : `1px solid ${themeColors.border}`,
-                    cursor: "pointer",
-                    transition: "0.2s",
-                  }}
-                  onClick={() => toggleSelect(img.id)}
-                >
-                  <div style={{ position: "absolute", top: 8, left: 8, zIndex: 10 }}>
-                    {selected.has(img.id) ? (
-                      <CheckSquare size={20} color={themeColors.primary} />
-                    ) : (
-                      <Square size={20} color={themeColors.text} />
-                    )}
-                  </div>
-
-                  <div style={{ height: 120, overflow: "hidden", borderRadius: "8px 8px 0 0" }}>
-                    <img
-                      src={img.url}
-                      alt={img.originalName}
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                        display: "block",
-                      }}
-                      onError={(e) => {
-                        if (img.blob) {
-                          const newUrl = URL.createObjectURL(img.blob);
-                          e.target.src = newUrl;
-                          createdUrlsRef.current.add(newUrl);
-                        }
-                      }}
-                    />
-                  </div>
-
-                  <Card.Body className="p-2 text-center">
-                    <div style={{ fontSize: "0.8rem", color: themeColors.subtleText }}>
-                      {img.originalName}
-                    </div>
-                    <div style={{ fontSize: "0.7rem", color: themeColors.subtleText }}>
-                      {new Date(img.uploadedAt).toLocaleString()}
-                    </div>
-                  </Card.Body>
-                </Card>
-              </Col>
-            ))}
-          </Row>
-        </>
+          <Button size="sm" variant="primary" onClick={createJob}>
+            Create Annotation Job
+          </Button>
+        </div>
       )}
+
+      {/* Image grid */}
+      <Row xs={2} sm={3} md={4} lg={5} className="g-3">
+        {images.map((img) => (
+          <Col key={img.id}>
+            <Card
+              style={{
+                cursor: "pointer",
+                userSelect: "none",
+                background: themeColors.cardBg,
+                border: selected.has(img.id)
+                  ? `2px solid ${themeColors.primary}`
+                  : `1px solid ${themeColors.border}`,
+              }}
+              onClick={() => toggleSelect(img.id)}
+              draggable={false}
+            >
+              <div style={{ position: "absolute", top: 6, left: 6, zIndex: 5 }}>
+                {selected.has(img.id) ? (
+                  <CheckSquare color={themeColors.primary} />
+                ) : (
+                  <Square color={themeColors.text} />
+                )}
+              </div>
+
+              <div style={{ height: 120, overflow: "hidden" }}>
+                <img
+                  src={img.url}
+                  alt={img.originalName}
+                  draggable={false}
+                  style={{ objectFit: "cover", width: "100%", height: "100%" }}
+                  onError={(e) => {
+                    if (img.blob) {
+                      const newUrl = URL.createObjectURL(img.blob);
+                      e.target.src = newUrl;
+                      createdUrlsRef.current.add(newUrl);
+                    }
+                  }}
+                />
+              </div>
+
+              <Card.Body className="p-2 text-center">
+                <div style={{ fontSize: 12 }}>{img.originalName}</div>
+              </Card.Body>
+            </Card>
+          </Col>
+        ))}
+      </Row>
     </div>
   );
 }

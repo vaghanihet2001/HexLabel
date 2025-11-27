@@ -1,0 +1,39 @@
+/* ================================================
+   GLOBAL BOOTSTRAP FORM FIXES FOR DARK/LIGHT MODE
+   ================================================ */
+
+/* Override background + text + border */
+.form-control,
+.form-select {
+  background-color: var(--bs-form-control-bg) !important;
+  color: var(--bs-form-control-color) !important;
+  border-color: var(--bs-border-color) !important;
+}
+
+/* Focus style */
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--bs-border-color) !important;
+  box-shadow: none !important;
+}
+
+/* Dropdown arrow — force theme color */
+.form-select {
+  background-image: var(--select-arrow) !important;
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px;
+}
+
+/* Forcing date icon to follow theme */
+input[type="date"],
+input[type="datetime-local"] {
+  color-scheme: var(--dp-color-scheme);
+}
+
+/* Otherwise the icon remains dark in dark mode */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: var(--dp-icon-filter);
+  opacity: 0.85;
+}

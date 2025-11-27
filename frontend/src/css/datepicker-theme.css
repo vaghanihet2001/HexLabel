@@ -1,0 +1,100 @@
+/* ================================
+   React Datepicker Theme Override
+   Fully controlled using CSS vars
+   ================================ */
+
+/* Input box (attached to your form-control) */
+.react-datepicker__input-container input {
+  background-color: var(--dp-bg) !important;
+  color: var(--dp-text) !important;
+  border: 1px solid var(--dp-border) !important;
+}
+
+/* Calendar popup */
+.react-datepicker {
+  background-color: var(--dp-bg) !important;
+  border: 1px solid var(--dp-border) !important;
+  color: var(--dp-text) !important;
+}
+
+/* Month header */
+.react-datepicker__current-month,
+.react-datepicker-time__header,
+.react-datepicker-year-header {
+  color: var(--dp-text) !important;
+}
+
+/* Navigation arrows */
+.react-datepicker__navigation-icon::before {
+  border-color: var(--dp-text) !important;
+}
+
+/* Day names */
+.react-datepicker__day-name {
+  color: var(--dp-text) !important;
+}
+
+/* Days */
+.react-datepicker__day {
+  color: var(--dp-text) !important;
+}
+
+/* Selected day */
+.react-datepicker__day--selected,
+.react-datepicker__day--keyboard-selected {
+  background-color: var(--dp-border) !important;
+  color: var(--dp-text) !important;
+}
+
+/* Hover */
+.react-datepicker__day:hover {
+  background-color: var(--dp-border) !important;
+  color: var(--dp-text) !important;
+}
+
+/* Time list (for datetime picker) */
+.react-datepicker__time-list {
+  background-color: var(--dp-bg) !important;
+  color: var(--dp-text) !important;
+}
+
+.react-datepicker__time-list-item {
+  color: var(--dp-text) !important;
+}
+
+.react-datepicker__time-list-item--selected {
+  background-color: var(--dp-border) !important;
+  color: var(--dp-text) !important;
+}
+
+
+/* ================================
+   FIX HEADER BACKGROUND + TEXT
+   ================================ */
+
+/* Header container (month and navigation buttons) */
+.react-datepicker__header {
+  background-color: var(--dp-bg) !important;
+  border-bottom: 1px solid var(--dp-border) !important;
+}
+
+/* Month/year text */
+.react-datepicker__current-month,
+.react-datepicker-time__header,
+.react-datepicker-year-header {
+  color: var(--dp-text) !important;
+}
+
+/* Day names row */
+.react-datepicker__day-names {
+  background-color: var(--dp-bg) !important;
+}
+
+.react-datepicker__day-name {
+  color: var(--dp-text) !important;
+}
+
+/* Horizontal divider */
+.react-datepicker__header--time {
+  background-color: var(--dp-bg) !important;
+}

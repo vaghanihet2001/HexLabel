@@ -1,32 +1,57 @@
 import Dexie from "dexie";
 
-// Create or upgrade the database
 export const db = new Dexie("HexLabelDB");
 
-// ✅ Database schema (string IDs)
-db.version(9).stores({
-  projects: "id, name, description, datasets, models, folderHandle",
-  datasets: "id, name, description, projectId, folderHandle, createdAt",
-  datasetVersions: "id, datasetId, versionName, folderHandle, createdAt",
-  annotations: "id, datasetId, imageName, versionId, data",
-  jobs: "id, datasetId, name, imageIds, status, createdAt",
-  images: "id, datasetId, jobId, name, url, uploadedAt",
-  tempImages: "id, datasetId, name, url, uploadedAt",
+// ✅ Database schema (string IDs) — version 10
+db.version(10).stores({
+  projects: "id, name, description, createdAt",
+  datasets: "id, name, description, type, projectId, createdAt",
+  datasetVersions: "id, datasetId, versionName, createdAt",
+  annotations: "id, datasetId, imageId, versionId",
+  jobs: "id, datasetId, name, status, createdAt",
+  images: "id, datasetId, name, createdAt",
+  tempImages: "id, datasetId, name, createdAt",
 });
 
+// ❗ Store complex objects that cannot be indexed
+db.projects.mapToClass(class {
+  folderHandle;
+});
+
+db.datasets.mapToClass(class {
+  folderHandle;
+});
+
+db.images.mapToClass(class {
+  jobId;
+  url;
+});
+
+db.jobs.mapToClass(class {
+  imageIds;
+});
+
+db.annotations.mapToClass(class {
+  data;
+});
+
+db.tempImages.mapToClass(class {
+  url;
+});
+
+// Init log
 db.on("populate", () => {
   console.log("✅ Database initialized and ready for HexLabel");
 });
 
+// Open DB
 db.open().catch((err) => {
   console.error("❌ Failed to open Dexie DB:", err);
 });
 
-// ✅ ID generator
+// ID generator
 export const generateId = () => {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
+  if (crypto?.randomUUID) return crypto.randomUUID();
   return "id-" + Math.random().toString(36).substring(2, 11);
 };
 

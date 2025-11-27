@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { componentTypes } from "./components";
 import { pageType } from "./pages";
 import { useTheme } from "./components/ThemeContext";
+import "/src/css/global.css";
 
 const Header = componentTypes.header;
 const Sidebar = componentTypes.sideBar;

@@ -1,0 +1,163 @@
+/* LoginPage.module.css */
+
+/* --- Global Variables and Base Styles (Optional, could be in a global file too) --- */
+/* :root {
+  --font-family-inter: "Inter", sans-serif;
+} */
+
+/* --- Main Container --- */
+.container {
+  display: flex;
+  height: 100vh;
+  /* Use CSS variables for theme-dependent properties */
+  background-color: var(--background-color);
+  color: var(--text-color);
+  font-family: "Inter", sans-serif; /* Explicitly set font */
+  transition: all 0.3s ease;
+}
+
+/* --- Left Side - Illustration Section --- */
+.illustrationSide {
+  flex: 1; /* Takes up half the space */
+  background: black; /* This was a fixed color in your original */
+  color: white; /* This was a fixed color */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  transition: all 0.3s ease;
+}
+
+.logo {
+  width: 120px;
+  margin-bottom: 1.5rem;
+}
+
+.illustrationTitle {
+  font-size: 2rem;
+  font-weight: bold;
+  margin-bottom: 0.5rem;
+  text-align: center; /* Added for better centering in smaller viewports */
+}
+
+.illustrationText {
+  font-size: 1rem;
+  max-width: 300px; /* Constrain width for readability */
+  text-align: center;
+}
+
+/* --- Right Side - Auth Box Section --- */
+.authSide {
+  flex: 1; /* Takes up half the space */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Background gradient is applied via inline style in JSX */
+  transition: all 0.3s ease;
+}
+
+.authBox {
+  background: var(--background-color); /* Theme-dependent */
+  padding: 2.5rem;
+  border-radius: 12px;
+  box-shadow: 0 0 25px var(--background-color); /* Theme-dependent */
+  width: 360px; /* Fixed width */
+  color: var(--text-color); /* Theme-dependent */
+  transition: all 0.3s ease;
+  /* Ensure children (like h3 and form) don't overflow */
+  box-sizing: border-box;
+}
+
+
+.authTitle {
+  text-align: center;
+  margin-bottom: 1.5rem; /* Equivalent to Bootstrap's mb-4 for h3 */
+  color: var(--primary-color); /* Theme-dependent */
+
+}
+
+/* --- Input Field Styles --- */
+/* Important: This class needs to be combined with Bootstrap's form-control */
+.inputField {
+  background-color: var(--input-bg-color); /* Theme-dependent */
+  color: var(--text-color); /* Theme-dependent */
+  border: 1px solid var(--border-color); /* Theme-dependent */
+  /* These ensure consistent appearance, but form-control might override some */
+  padding: 0.375rem 0.75rem; /* Default Bootstrap input padding */
+  line-height: 1.5;
+  border-radius: 0.25rem; /* Default Bootstrap input border-radius */
+  width: 100%; /* Ensure it takes full width of its parent */
+  box-sizing: border-box; /* Include padding and border in the element's total width and height */
+}
+
+.inputField::placeholder {
+  color: var(--placeholder-color); /* Theme-dependent */
+  opacity: 1; /* Ensure full visibility of placeholder */
+}
+
+/* --- Button Styles --- */
+/* Combine with Bootstrap's btn, w-100 */
+.submitButton {
+  background-color: var(--primary-color); /* Theme-dependent */
+  color: #fff; /* Fixed white text */
+  border: none;
+  font-weight: bold;
+  margin-bottom: 15px; /* Specific margin */
+  transition: background 0.3s ease;
+  /* Ensure button padding/sizing is consistent with Bootstrap btn */
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.25rem;
+}
+
+.submitButton:hover{
+  color: var(--primary-color);
+  background-color: var(--primary-hover-color);
+  border: 2px solid var(--primary-color);
+
+}
+
+/* Combine with Bootstrap's btn, w-100 */
+.googleButton {
+  background-color: var(--accent-color); /* Theme-dependent */
+  color: var(--google-btn-text-color); /* Theme-dependent */
+  font-weight: 500;
+  display: flex; /* For icon and text alignment */
+  align-items: center;
+  justify-content: center;
+  gap: 10px; /* Space between icon and text */
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color); /* Theme-dependent */
+  transition: background 0.3s ease;
+}
+
+/* --- Error Message --- */
+/* Combine with Bootstrap's mt-3, text-center */
+.errorMessage {
+  font-size: 0.9rem;
+  color: var(--error-color); /* Theme-dependent */
+  margin-top: 1rem; /* Equivalent to Bootstrap's mt-3 */
+  text-align: center; /* Equivalent to Bootstrap's text-center */
+}
+
+/* --- Mode Switch Links --- */
+/* Combine with Bootstrap's btn, btn-link, p-0 */
+.linkButton {
+  color: var(--link-color); /* Theme-dependent */
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline; /* Standard link appearance */
+  font-size: 1rem; /* Ensure consistent font size */
+}
+
+.modeSwitchContainer {
+  text-align: center; /* Equivalent to Bootstrap's text-center */
+  margin-top: 1.5rem; /* Equivalent to Bootstrap's mt-4 */
+}
+
+.modeSwitchContainer p {
+  margin-bottom: 0.5rem; /* Small margin for paragraph before button */
+}

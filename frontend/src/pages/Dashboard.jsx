@@ -1,7 +1,9 @@
 // frontend/src/pages/Dashboard.jsx
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Card, Row, Col, ProgressBar, ListGroup } from "react-bootstrap";
 import { useTheme } from "../components/ThemeContext";
+import db from "/src/utils/db";
+
 import {
   Folder,
   Database,
@@ -15,44 +17,109 @@ import {
 
 export default function Dashboard() {
   const { themeColors } = useTheme();
+  const [stats, setStats] = useState(null);
 
-  // --- Demo stats (replace with real data later) ---
-  const stats = {
-    projects: 8,
-    datasets: 12,
-    storageUsed: "4.8 GB",
-    storagePercent: 48,
-    categories: [
-      { name: "Detection", icon: <Image size={16} />, count: 5 },
-      { name: "Segmentation", icon: <PenTool size={16} />, count: 3 },
-      { name: "Classification", icon: <Tag size={16} />, count: 2 },
-      { name: "Keypoints", icon: <MousePointer2 size={16} />, count: 1 },
-    ],
-    recentActivity: [
-      {
-        id: 1,
-        text: "Annotated 120 new objects in 'CityScenes' dataset.",
-        time: "2 hours ago",
-      },
-      {
-        id: 2,
-        text: "Created new project 'Vehicle Detection v2'.",
-        time: "1 day ago",
-      },
-      {
-        id: 3,
-        text: "Uploaded dataset 'People Segmentation'.",
-        time: "2 days ago",
-      },
-      {
-        id: 4,
-        text: "Exported annotations to COCO format.",
-        time: "3 days ago",
-      },
-    ],
+  // Icons mapping
+  const categoryIcons = {
+    Detection: <Image size={16} />,
+    Segmentation: <PenTool size={16} />,
+    Classification: <Tag size={16} />,
+    Keypoints: <MousePointer2 size={16} />,
   };
 
-  // --- Theme styles ---
+  // Load dashboard stats from IndexedDB
+  useEffect(() => {
+    async function loadStats() {
+      try {
+        const projects = await db.projects.count();
+        const datasets = await db.datasets.count();
+        const images = await db.images.count();
+        const annotations = await db.annotations.count();
+        const jobs = await db.jobs.count();
+
+        // Storage estimation (IndexedDB blobs aren't easy to size)
+        // → so approximate by number of images × 1.5MB avg
+        const estimatedBytes = images * 1.5 * 1024 * 1024;
+        const storageUsed =
+          (estimatedBytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+        const storagePercent = Math.min(
+          Math.round((estimatedBytes / (5 * 1024 * 1024 * 1024)) * 100),
+          100
+        ); // assume 5GB local limit
+
+        // Build category stats by reading annotation types
+        const annotationRows = await db.annotations.toArray();
+        const categoriesCount = {
+          Detection: 0,
+          Segmentation: 0,
+          Classification: 0,
+          Keypoints: 0,
+        };
+
+        annotationRows.forEach((a) => {
+          const type = a?.data?.type;
+          if (type && categoriesCount[type] !== undefined) {
+            categoriesCount[type]++;
+          }
+        });
+
+        const categories = Object.keys(categoriesCount).map((key) => ({
+          name: key,
+          count: categoriesCount[key],
+        }));
+
+        // No activity table in schema → generate fallback from timestamps
+        const recentActivity = [
+          {
+            id: 1,
+            text: `You have ${projects} project(s)`,
+            time: "now",
+          },
+          {
+            id: 2,
+            text: `${datasets} datasets present`,
+            time: "now",
+          },
+          {
+            id: 3,
+            text: `${images} images imported`,
+            time: "now",
+          },
+          {
+            id: 4,
+            text: `${annotations} annotations created`,
+            time: "now",
+          },
+        ];
+
+        setStats({
+          projects,
+          datasets,
+          images,
+          jobs,
+          annotations,
+          storageUsed,
+          storagePercent,
+          categories,
+          recentActivity,
+        });
+      } catch (err) {
+        console.error("Dashboard DB error:", err);
+      }
+    }
+
+    loadStats();
+  }, []);
+
+  if (!stats) {
+    return (
+      <div className="p-4" style={{ color: themeColors.text }}>
+        <h4>Loading dashboard...</h4>
+      </div>
+    );
+  }
+
+  // UI card style
   const cardStyle = {
     backgroundColor: themeColors.cardBg,
     color: themeColors.text,
@@ -70,14 +137,16 @@ export default function Dashboard() {
         minHeight: "100%",
       }}
     >
-      {/* Header */}
       <h2 className="fw-semibold mb-3">Dashboard</h2>
       <p style={{ opacity: 0.8 }}>Overview of your annotation workspace</p>
 
       {/* Summary cards */}
       <Row xs={1} sm={2} md={3} className="g-4 mt-2">
         <Col>
-          <Card style={cardStyle} className="p-3 d-flex flex-row align-items-center">
+          <Card
+            style={cardStyle}
+            className="p-3 d-flex flex-row align-items-center"
+          >
             <Folder size={36} className="me-3" color={themeColors.text} />
             <div>
               <h5 className="mb-1">{stats.projects}</h5>
@@ -85,8 +154,12 @@ export default function Dashboard() {
             </div>
           </Card>
         </Col>
+
         <Col>
-          <Card style={cardStyle} className="p-3 d-flex flex-row align-items-center">
+          <Card
+            style={cardStyle}
+            className="p-3 d-flex flex-row align-items-center"
+          >
             <Database size={36} className="me-3" color={themeColors.text} />
             <div>
               <h5 className="mb-1">{stats.datasets}</h5>
@@ -94,6 +167,7 @@ export default function Dashboard() {
             </div>
           </Card>
         </Col>
+
         <Col>
           <Card style={cardStyle} className="p-3">
             <div className="d-flex justify-content-between align-items-center mb-2">
@@ -101,7 +175,7 @@ export default function Dashboard() {
                 <HardDrive size={28} className="me-2" color={themeColors.text} />
                 <div>
                   <h6 className="mb-0">Storage</h6>
-                  <small>{stats.storageUsed} used</small>
+                  <small>{stats.storageUsed} estimated</small>
                 </div>
               </div>
               <span>{stats.storagePercent}%</span>
@@ -133,7 +207,7 @@ export default function Dashboard() {
                 }}
               >
                 <div className="d-flex align-items-center">
-                  {cat.icon}
+                  {categoryIcons[cat.name]}
                   <span className="ms-2">{cat.name}</span>
                 </div>
                 <span className="badge bg-secondary">{cat.count}</span>
@@ -143,7 +217,7 @@ export default function Dashboard() {
         </Row>
       </Card>
 
-      {/* Activity feed */}
+      {/* Activity */}
       <Card style={{ ...cardStyle, marginTop: "2rem" }} className="p-3">
         <div className="d-flex align-items-center mb-2">
           <Activity size={20} className="me-2" color={themeColors.text} />

@@ -3,3 +3,46 @@ body {
   font-family: Arial, sans-serif;
   background: #f0f0f0;
 }
+
+/* ================================
+   GLOBAL THEMED GRADIENT SCROLLBAR
+   ================================ */
+
+/* For WebKit Browsers (Chrome, Edge, Safari, etc.) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(
+    180deg,
+    var(--scroll-primary),
+    var(--scroll-accent)
+  ) !important;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(
+    180deg,
+    var(--scroll-accent),
+    var(--scroll-primary)
+  ) !important;
+}
+
+/* Firefox Scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-primary) transparent;
+}
+
+
+/* Force dropdown menus to stay on top */
+.dropdown-menu {
+  z-index: 10000 !important;
+}

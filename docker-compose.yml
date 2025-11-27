@@ -3,7 +3,7 @@ services:
     build: ./frontend
     container_name: hexlabel-frontend
     ports:
-      - "5173:5173"
+      - "5000:5000"
     working_dir: /app
     volumes:
       - ./frontend:/app        # mount only the frontend folder

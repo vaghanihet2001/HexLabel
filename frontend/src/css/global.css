@@ -1,0 +1,269 @@
+/* ============================================================
+   GLOBAL VARIABLES (injected from ThemeContext)
+=============================================================== */
+
+html, body {
+  background: var(--background) !important;
+  color: var(--text) !important;
+  font-family: "Inter", sans-serif;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+/* ============================================================
+   CARDS
+=============================================================== */
+.card {
+  background: var(--cardBg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* ============================================================
+   INPUTS
+=============================================================== */
+input,
+textarea,
+select,
+.form-control {
+  background: var(--inputBg) !important;
+  color: var(--inputText) !important;
+  border: 1px solid var(--border) !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--placeholderText) !important;
+}
+
+.form-control:focus {
+  background: var(--inputBg) !important;
+  border-color: var(--primary) !important;
+  color: var(--inputText) !important;
+  box-shadow: 0 0 0 2px var(--accent) !important;
+}
+
+/* ============================================================
+   BUTTONS — FIXED so Bootstrap variants work correctly
+=============================================================== */
+
+/* Base text color only (DON’T override background!) */
+.btn {
+  color: var(--buttonText) !important;
+}
+
+/* PRIMARY */
+.btn-primary {
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+  color: #fff !important;
+}
+
+.btn-primary:hover {
+  opacity: 0.9 !important;
+}
+
+/* OUTLINE PRIMARY */
+.btn-outline-primary {
+  color: var(--primary) !important;
+  border-color: var(--primary) !important;
+}
+.btn-outline-primary:hover {
+  background: var(--primary) !important;
+  color: white !important;
+}
+
+/* OUTLINE DANGER */
+.btn-outline-danger {
+  color: var(--error) !important;
+  border-color: var(--error) !important;
+}
+.btn-outline-danger:hover {
+  background: var(--error) !important;
+  color: white !important;
+}
+
+/* OUTLINE SECONDARY */
+.btn-outline-secondary {
+  color: var(--subtleText) !important;
+  border-color: var(--border) !important;
+}
+.btn-outline-secondary:hover {
+  background: var(--hoverBg) !important;
+}
+
+/* OUTLINE WARNING */
+.btn-outline-warning {
+  color: #eab308 !important; /* gold */
+  border-color: #eab308 !important;
+}
+.btn-outline-warning:hover {
+  background: #eab308 !important;
+  color: black !important;
+}
+
+/* CLOSE BUTTON (modal X) */
+.btn-close {
+  filter: invert(1); /* visible in dark mode */
+  opacity: 0.7;
+}
+.btn-close:hover {
+  opacity: 1;
+}
+
+/* ============================================================
+   MODAL
+=============================================================== */
+.modal-content {
+  background: var(--cardBg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
+.modal-header,
+.modal-footer {
+  background: var(--cardBg) !important;
+  border-color: var(--border) !important;
+}
+
+/* ============================================================
+   DROPDOWN
+=============================================================== */
+.dropdown-menu {
+  background: var(--cardBg) !important;
+  border: 1px solid var(--border) !important;
+}
+
+.dropdown-item {
+  color: var(--text) !important;
+}
+
+.dropdown-item:hover {
+  background: var(--hoverBg) !important;
+}
+
+/* ============================================================
+   TABLE
+=============================================================== */
+.table {
+  background: var(--cardBg) !important;
+  color: var(--text) !important;
+}
+
+.table td,
+.table th {
+  border-color: var(--border) !important;
+}
+
+/* ============================================================
+   TOOLTIPS
+=============================================================== */
+.tooltip-inner {
+  background: var(--toolbarBg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* ============================================================
+   SCROLLBAR
+=============================================================== */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--scroll-primary), var(--scroll-accent));
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--sidebarBg);
+}
+
+
+/* ============================================================
+   SIDEBAR (theme-aware)
+=============================================================== */
+
+.sidebar-wrapper {
+  background: var(--sidebarBg);
+  border-right: 1px solid var(--border);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+}
+
+/* Collapse button */
+.sidebar-toggle-btn {
+  position: absolute;
+  top: 50%;
+  right: -14px;
+  transform: translateY(-50%);
+  background: var(--cardBg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 50% !important;
+  padding: 6px !important;
+  width: 32px !important;
+  height: 32px !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px var(--shadow);
+  transition: all 0.2s ease-in-out;
+  z-index: 20;
+}
+
+/* Nav items */
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+  color: var(--text);
+  padding: 10px 16px;
+  margin: 4px 10px;
+  border-radius: 8px;
+  transition: 0.2s ease;
+}
+
+.sidebar-nav-item:hover {
+  background: var(--hoverBg);
+}
+
+/* Active item */
+.active-sidebar-item {
+  background: var(--hoverBg);
+}
+
+/* Collapsed nav item */
+.sidebar-nav-item.collapsed {
+  padding: 10px;
+  justify-content: center;
+}
+
+.sidebar-item-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Collapsed inner */
+.sidebar-nav-item.collapsed .sidebar-item-inner {
+  gap: 0;
+  justify-content: center;
+}
+
+/* Footer */
+.sidebar-footer {
+  font-size: 0.8rem;
+  color: var(--text);
+  opacity: 0.5;
+  margin-top: auto;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.sidebar-footer.collapsed {
+  display: none;
+}

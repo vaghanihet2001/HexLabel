@@ -1,7 +1,7 @@
 # 🚀 HexLabel
 
-**HexLabel** is an intuitive, modern annotation platform designed to make image and dataset labeling seamless and efficient.  
-It supports folder or file-based imports, annotation visualization, and integrates easily into AI/ML data pipelines.
+**HexLabel** is an intuitive, modern annotation web app designed to make image and dataset labeling seamless and efficient.  
+It supports Images imports, annotation visualization, and integrates easily into AI/ML data pipelines.
 
 ---
 
@@ -20,7 +20,6 @@ Users can easily:
 | Layer | Technology |
 |-------|-------------|
 | **Frontend** | ⚛️ React.js |
-| **Backend** | 🐍 FastAPI (Python) |
 | **Deployment** | 🐳 Docker |
 
 ---
@@ -36,14 +35,11 @@ docker-compose up --build
 
 🌐 Frontend (React): http://localhost:5173 
 
-🧩 Backend (FastAPI): http://localhost:8000
-
 ## 📦 Folder Structure
 ```
 HexLabel/
 │
 ├── frontend/        # React frontend app
-├── backend/         # FastAPI backend service
 ├── docker-compose.yml
 └── README.md
 ```

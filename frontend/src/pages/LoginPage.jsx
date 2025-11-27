@@ -1,12 +1,11 @@
-// frontend/src/pages/LoginPage.jsx
 import React, { useState } from "react";
 import { FaGoogle } from "react-icons/fa";
 import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "../components/ThemeContext";
-import logo from "../assets/logo-removebg.png";
+import styles from "./LoginPage.module.css"; // Correct import for CSS Module
 
 const LoginPage = () => {
-  const [authMode, setAuthMode] = useState("login"); // 'login', 'signup', or 'reset'
+  const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -20,67 +19,52 @@ const LoginPage = () => {
     else if (authMode === "reset") await resetPassword(email);
   };
 
+  // Define CSS variables as an object to pass to the root element's style prop
+  // Added fallback values for safety, though themeColors should ideally be complete
+  const cssVariables = {
+    "--background-color": themeColors.background || "#f0f2f5",
+    "--text-color": themeColors.text || "#333",
+    "--primary-color": themeColors.primary || "#007bff",
+    "--accent-color": themeColors.accent || "#6c757d", // For the gradient
+    "--surface-color": themeColors.surface || themeColors.cardBg || "#ffffff",
+    "--shadow-color": themeColors.shadow || "rgba(0,0,0,0.3)",
+    "--input-bg-color": themeColors.inputBg || "#f8f9fa",
+    "--border-color": themeColors.border || "#ced4da",
+    "--placeholder-color": themeColors.text || "#6c757d", // Placeholder often slightly lighter
+    "--google-btn-bg-color": themeColors.googleBtnBg || "#ffffff",
+    "--google-btn-text-color": themeColors.googleBtnText || "#333",
+    "--error-color": themeColors.error || "#ff6b6b",
+    "--link-color": themeColors.link || "#007bff",
+  };
+
   return (
-    <div
-      style={{
-        display: "flex",
-        height: "100vh",
-        backgroundColor: themeColors.background,
-        color: themeColors.text,
-        fontFamily: "Inter, sans-serif",
-        transition: "all 0.3s ease",
-      }}
-    >
+    
+    // Apply the main container class and CSS variables
+    <div className={styles.container} style={cssVariables}>
       {/* Left side - Illustration */}
-      <div
-        style={{
-          flex: 1,
-          background: `linear-gradient(135deg, ${themeColors.primary}, ${themeColors.accent})`,
-          color: "white",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "2rem",
-          transition: "all 0.3s ease",
-        }}
-      >
+      <div className={styles.illustrationSide}>
+      
         <img
-          src={logo}
+          src="/src/assets/logo-removebg.png"
           alt="HexLabel Logo"
-          style={{ width: "120px", marginBottom: "1.5rem" }}
+          className={styles.logo}
         />
-        <h1 style={{ fontSize: "2rem", fontWeight: "bold", marginBottom: "0.5rem" }}>
-          Welcome to HexLabel
-        </h1>
-        <p style={{ fontSize: "1rem", maxWidth: "300px", textAlign: "center" }}>
-          Anotate your data with ease,learn computer vision and grow.
+        <h1 className={styles.illustrationTitle}>Welcome to HexLabel</h1>
+        <p className={styles.illustrationText}>
+          Annotate your images with ease.
         </p>
       </div>
 
       {/* Right side - Auth box */}
       <div
+        className={styles.authSide}
+        // Background gradient still needs to be inline as it's a function of two variables
         style={{
-          flex: 1,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: themeColors.cardBg,
-          transition: "all 0.3s ease",
+          background: `linear-gradient(135deg, ${cssVariables["--primary-color"]}, ${cssVariables["--accent-color"]})`,
         }}
       >
-        <div
-          style={{
-            background: themeColors.surface || themeColors.cardBg,
-            padding: "2.5rem",
-            borderRadius: "12px",
-            boxShadow: `0 0 25px ${themeColors.shadow || "rgba(0,0,0,0.3)"}`,
-            width: "360px",
-            color: themeColors.text,
-            transition: "all 0.3s ease",
-          }}
-        >
-          <h3 className="text-center mb-4" style={{ color: themeColors.text }}>
+        <div className={styles.authBox}>
+          <h3 className={styles.authTitle}>
             {authMode === "login"
               ? "Login"
               : authMode === "signup"
@@ -92,58 +76,36 @@ const LoginPage = () => {
             {authMode === "signup" && (
               <input
                 type="text"
-                className="form-control mb-3"
+                // Combine custom inputField class with Bootstrap's form-control and mb-3
+                className={`${styles.inputField} form-control mb-3`}
                 placeholder="Full Name"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 required
-                style={{
-                  backgroundColor: themeColors.inputBg,
-                  color: themeColors.text,
-                  border: `1px solid ${themeColors.border}`,
-                  
-                } }
               />
             )}
             <input
               type="email"
-              className="form-control mb-3"
+              className={`${styles.inputField} form-control mb-3`}
               placeholder="Email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              style={{
-                backgroundColor: themeColors.inputBg,
-                color: themeColors.text,
-                border: `1px solid ${themeColors.border}`,
-              }}
             />
             {authMode !== "reset" && (
               <input
                 type="password"
-                className="form-control mb-3"
+                className={`${styles.inputField} form-control mb-3`}
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                style={{
-                  backgroundColor: themeColors.inputBg,
-                  color: themeColors.text,
-                  border: `1px solid ${themeColors.border}`,
-                }}
               />
             )}
             <button
               type="submit"
-              className="btn w-100"
-              style={{
-                backgroundColor: themeColors.primary,
-                color: "#fff",
-                border: "none",
-                fontWeight: "bold",
-                marginBottom: "15px",
-                transition: "background 0.3s ease",
-              }}
+              // Combine custom submitButton class with Bootstrap's btn and w-100
+              className={`${styles.submitButton} btn w-100`}
             >
               {authMode === "login"
                 ? "Login"
@@ -157,53 +119,36 @@ const LoginPage = () => {
           {authMode === "login" && (
             <button
               onClick={loginWithGoogle}
-              className="btn w-100"
-              style={{
-                backgroundColor: themeColors.googleBtnBg || "#ffffff",
-                color: themeColors.googleBtnText || "#333",
-                fontWeight: "500",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "10px",
-                padding: "10px",
-                borderRadius: "6px",
-                border: `1px solid ${themeColors.border}`,
-              }}
+              // Combine custom googleButton class with Bootstrap's btn and w-100
+              className={`${styles.googleButton} btn w-100`}
             >
               <FaGoogle color="#DB4437" /> Sign in with Google
             </button>
           )}
 
           {error && (
-            <p
-              className="mt-3 text-center"
-              style={{
-                fontSize: "0.9rem",
-                color: themeColors.error || "#ff6b6b",
-              }}
-            >
+            // Combine custom errorMessage class with Bootstrap's mt-3 and text-center
+            <p className={`${styles.errorMessage} mt-3 text-center`}>
               {error}
             </p>
           )}
 
           {/* Mode Switch */}
-          <div className="text-center mt-4">
+          <div className={`${styles.modeSwitchContainer} text-center mt-4`}>
             {authMode === "login" ? (
               <>
                 <p>
                   Don’t have an account?{" "}
                   <button
-                    className="btn btn-link p-0"
-                    style={{ color: themeColors.link }}
+                    // Combine custom linkButton class with Bootstrap's btn, btn-link, p-0
+                    className={`${styles.linkButton} btn btn-link p-0`}
                     onClick={() => setAuthMode("signup")}
                   >
                     Sign Up
                   </button>
                 </p>
                 <button
-                  className="btn btn-link p-0"
-                  style={{ color: themeColors.link }}
+                  className={`${styles.linkButton} btn btn-link p-0`}
                   onClick={() => setAuthMode("reset")}
                 >
                   Forgot Password?
@@ -211,8 +156,7 @@ const LoginPage = () => {
               </>
             ) : (
               <button
-                className="btn btn-link p-0"
-                style={{ color: themeColors.link }}
+                className={`${styles.linkButton} btn btn-link p-0`}
                 onClick={() => setAuthMode("login")}
               >
                 Back to Login

@@ -9,7 +9,10 @@ import {
   OverlayTrigger,
   Tooltip,
 } from "react-bootstrap";
+
 import { useTheme } from "../components/ThemeContext";
+import AppModal from "../components/AppModal";
+
 import {
   Edit,
   Trash2,
@@ -18,75 +21,167 @@ import {
   Cpu,
   FolderOpen,
   Lock,
+  Upload,
 } from "lucide-react";
+
 import { db } from "../utils/db";
+import { deleteProject } from "../utils/cleanup";
 
 export default function Projects() {
   const { themeColors } = useTheme();
+
   const [projects, setProjects] = useState([]);
   const [showEdit, setShowEdit] = useState(false);
-  const [showDelete, setShowDelete] = useState(false);
   const [currentProject, setCurrentProject] = useState(null);
-  const [permissionNeeded, setPermissionNeeded] = useState(false);
 
-  // ✅ Load projects and compute dataset counts dynamically
+  const [permissionNeeded, setPermissionNeeded] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  // -----------------------------
+  // GLOBAL APP MODAL STATE
+  // -----------------------------
+  const [modal, setModal] = useState({
+    show: false,
+    type: "info",
+    title: "",
+    message: "",
+    confirmText: "OK",
+    cancelText: "Cancel",
+    onConfirm: null,
+    autoClose: false,
+  });
+
+  // FIXED — no more leftover props
+  const openModal = (data) => {
+    setModal({
+      show: true,
+      type: data.type || "info",
+      title: data.title || "",
+      message: data.message || "",
+      confirmText: data.confirmText || "OK",
+      cancelText: data.cancelText || "Cancel",
+      onConfirm: data.onConfirm || null,
+      autoClose: data.autoClose || false,
+    });
+  };
+
+  const closeModal = () =>
+    setModal((prev) => ({
+      ...prev,
+      show: false,
+      onConfirm: null,
+      autoClose: false,
+    }));
+
+  // -----------------------------
+  // LOAD PROJECTS
+  // -----------------------------
+  const reloadProjects = async () => {
+    const projectsWithCounts = await Promise.all(
+      (await db.projects.toArray()).map(async (proj) => {
+        const datasetCount = await db.datasets
+          .where("projectId")
+          .equals(proj.id)
+          .count();
+
+        return { ...proj, datasets: datasetCount };
+      })
+    );
+
+    setProjects(projectsWithCounts);
+  };
+
   useEffect(() => {
-    const init = async () => {
-      const projectsWithCounts = await Promise.all(
-        (await db.projects.toArray()).map(async (proj) => {
-          const count = await db.datasets
-            .where("projectId")
-            .equals(proj.id)
-            .count();
-          return { ...proj, datasets: count };
-        })
-      );
-      setProjects(projectsWithCounts);
-    };
-    init();
+    reloadProjects();
   }, []);
 
-  // ✅ Folder selection with write permission
+  // -----------------------------
+  // SELECT FOLDER
+  // -----------------------------
   const handleSelectFolder = async () => {
     try {
-      const handle = await window.showDirectoryPicker();
-      const perm = await handle.requestPermission({ mode: "readwrite" });
+      const folder = await window.showDirectoryPicker();
+      const perm = await folder.requestPermission({ mode: "readwrite" });
+
       if (perm !== "granted") {
-        alert(
-          "Write permission not granted. Please allow access to save project data."
-        );
         setPermissionNeeded(true);
-        setCurrentProject((p) => ({ ...p, folderHandle: handle }));
-        return;
+        return openModal({
+          type: "error",
+          title: "Permission Required",
+          message: "Write permission is required to save project files.",
+        });
       }
-      setPermissionNeeded(false);
-      setCurrentProject((p) => ({ ...p, folderHandle: handle }));
+
+      setCurrentProject((prev) => ({
+        ...prev,
+        folderHandle: folder,
+      }));
     } catch (err) {
-      console.warn("Folder selection cancelled or failed:", err);
+      console.warn("Folder select canceled:", err);
     }
   };
 
-  // ✅ Save or update a project
+  // -----------------------------
+  // SAVE METADATA FILE
+  // -----------------------------
+  const saveProjectMetadataToDisk = async (project) => {
+    try {
+      const file = await project.folderHandle.getFileHandle(
+        "hexlabel.project.json",
+        { create: true }
+      );
+
+      const writable = await file.createWritable();
+      await writable.write(
+        JSON.stringify(
+          {
+            id: project.id,
+            name: project.name,
+            description: project.description,
+            createdAt: project.createdAt,
+            datasets: [],
+          },
+          null,
+          2
+        )
+      );
+      await writable.close();
+    } catch (err) {
+      openModal({
+        type: "error",
+        title: "Write Error",
+        message: "Failed to write hexlabel.project.json",
+      });
+    }
+  };
+
+  // -----------------------------
+  // SAVE PROJECT
+  // -----------------------------
   const handleSaveProject = async (e) => {
     e.preventDefault();
-    if (!currentProject) return;
+
     if (!currentProject.folderHandle) {
-      alert("Please select a project folder before saving.");
-      return;
+      return openModal({
+        type: "error",
+        title: "Folder Required",
+        message: "Please select a project folder.",
+      });
     }
 
     const fh = currentProject.folderHandle;
     let perm = await fh.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted") perm = await fh.requestPermission({ mode: "readwrite" });
+
     if (perm !== "granted") {
-      perm = await fh.requestPermission({ mode: "readwrite" });
-    }
-    if (perm !== "granted") {
-      alert("Write permission required to save project. Please grant access.");
-      setPermissionNeeded(true);
-      return;
+      return openModal({
+        type: "error",
+        title: "Permission Denied",
+        message: "Write permission is required.",
+      });
     }
 
-    const toStore = {
+    const record = {
       id: currentProject.id || crypto.randomUUID(),
       name: currentProject.name,
       description: currentProject.description,
@@ -96,148 +191,145 @@ export default function Projects() {
       createdAt: currentProject.createdAt || new Date().toISOString(),
     };
 
-    try {
-      await db.projects.put(toStore);
+    await db.projects.put(record);
+    await saveProjectMetadataToDisk(record);
 
-      const projectsWithCounts = await Promise.all(
-        (await db.projects.toArray()).map(async (proj) => {
-          const count = await db.datasets
-            .where("projectId")
-            .equals(proj.id)
-            .count();
-          return { ...proj, datasets: count };
-        })
-      );
-
-      setProjects(projectsWithCounts);
-      setShowEdit(false);
-      setCurrentProject(null);
-      setPermissionNeeded(false);
-    } catch (err) {
-      console.error("Failed to save project:", err);
-      alert("Failed to save project. See console for details.");
-    }
+    setShowEdit(false);
+    setCurrentProject(null);
+    setPermissionNeeded(false);
+    await reloadProjects();
   };
 
-  // ✅ Delete a project and all related data
-  const handleDeleteProject = async () => {
-    if (!currentProject) return;
-    const projectId = currentProject.id;
-
+  // -----------------------------
+  // LOAD EXISTING PROJECT
+  // -----------------------------
+  const handleLoadProject = async () => {
     try {
-      const datasets = await db.datasets
-        .where("projectId")
-        .equals(projectId)
-        .toArray();
+      setLoading(true);
 
-      for (const ds of datasets) {
-        await db.datasetVersions.where("datasetId").equals(ds.id).delete();
-        await db.annotations.where("datasetId").equals(ds.id).delete();
-        await db.images.where("datasetId").equals(ds.id).delete();
-        await db.jobs.where("datasetId").equals(ds.id).delete();
-        await db.tempImages.where("datasetId").equals(ds.id).delete();
+      const folder = await window.showDirectoryPicker();
+      const perm = await folder.requestPermission({ mode: "readwrite" });
+
+      if (perm !== "granted") {
+        return openModal({
+          type: "error",
+          title: "Permission Required",
+          message: "Read/write permission is required.",
+        });
       }
 
-      await db.datasets.where("projectId").equals(projectId).delete();
-      await db.projects.delete(projectId);
+      let metaFile;
+      try {
+        metaFile = await folder.getFileHandle("hexlabel.project.json");
+      } catch {
+        return openModal({
+          type: "error",
+          title: "Invalid Project",
+          message: "hexlabel.project.json not found.",
+        });
+      }
 
-      const projectsWithCounts = await Promise.all(
-        (await db.projects.toArray()).map(async (proj) => {
-          const count = await db.datasets
-            .where("projectId")
-            .equals(proj.id)
-            .count();
-          return { ...proj, datasets: count };
-        })
-      );
+      const data = JSON.parse(await (await metaFile.getFile()).text());
 
-      setProjects(projectsWithCounts);
-      setShowDelete(false);
-      setCurrentProject(null);
-    } catch (err) {
-      console.error("Error deleting project:", err);
-      alert("Failed to delete project. Check console for details.");
-    }
-  };
-
-  // ✅ Grant permission to existing project folder
-  const handleGrantPermissionForProject = async (proj) => {
-    if (!proj?.folderHandle) {
-      alert("No folder handle present — reselect folder.");
-      return;
-    }
-    try {
-      const perm = await proj.folderHandle.requestPermission({
-        mode: "readwrite",
+      await db.projects.put({
+        ...data,
+        folderHandle: folder,
       });
-      if (perm === "granted") {
-        alert("Permission granted. You can now create datasets inside this project.");
-      } else {
-        alert("Permission not granted.");
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Permission request failed.");
+
+      await reloadProjects();
+
+      openModal({
+        type: "success",
+        title: "Project Loaded",
+        message: `"${data.name}" loaded successfully.`,
+      });
+    } catch {
+      openModal({
+        type: "error",
+        title: "Load Failed",
+        message: "Could not load project folder.",
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
-  const cardStyle = {
-    backgroundColor: themeColors.cardBg,
-    color: themeColors.text,
-    border: `2px solid ${themeColors.border}`,
-    borderRadius: "12px",
-    boxShadow: "0 4px 10px rgba(0,0,0,0.05)",
+  // -----------------------------
+  // DELETE PROJECT (CONFIRM)
+  // -----------------------------
+  const askDeleteProject = (project) => {
+    setCurrentProject(project);
+
+    openModal({
+      type: "confirm",
+      title: "Delete Project?",
+      message: `Are you sure you want to delete "${project.name}"?\nThis will delete all datasets, images, jobs, versions AND the actual filesystem folder.`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        await deleteProject(project.id);
+        await reloadProjects();
+        return true;
+      },
+      autoClose: true,
+    });
   };
 
+  // -----------------------------
+  // UI
+  // -----------------------------
   return (
-    <div
-      className="p-4"
-      style={{
-        backgroundColor: themeColors.background,
-        color: themeColors.text,
-      }}
-    >
+    <div className="p-4">
+      {/* CUSTOM GLOBAL MODAL */}
+      <AppModal {...modal} show={modal.show} onClose={closeModal} />
+
+      {/* HEADER */}
       <div className="d-flex justify-content-between align-items-center mb-4">
-        <h2 className="fw-semibold mb-0">Projects</h2>
-        <Button
-          variant="primary"
-          onClick={() => {
-            setCurrentProject({
-              id: null,
-              name: "",
-              description: "",
-              datasets: 0,
-              models: 0,
-              folderHandle: null,
-            });
-            setShowEdit(true);
-            setPermissionNeeded(false);
-          }}
-        >
-          <Plus size={16} className="me-1" />
-          Add Project
-        </Button>
+        <h2 className="fw-semibold">Projects</h2>
+
+        <div className="d-flex gap-2">
+          <Button variant="outline-success" onClick={handleLoadProject}>
+            <Upload size={16} className="me-1" /> Load Project
+          </Button>
+
+          <Button
+            variant="primary"
+            onClick={() => {
+              setCurrentProject({
+                id: null,
+                name: "",
+                description: "",
+                datasets: 0,
+                models: 0,
+                folderHandle: null,
+              });
+              setShowEdit(true);
+            }}
+          >
+            <Plus size={16} className="me-1" /> Add Project
+          </Button>
+        </div>
       </div>
 
+      {/* PROJECT GRID */}
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
         {projects.map((project) => (
           <Col key={project.id}>
-            <Card style={cardStyle} className="p-2 h-100">
+            <Card className="p-2 h-100 shadow-sm">
               <div
+                className="d-flex align-items-center justify-content-center"
                 style={{
                   height: 140,
                   borderRadius: 10,
                   background: themeColors.toolbarBg,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
                 }}
               >
                 <FolderOpen size={28} />
               </div>
-              <Card.Body className="pt-2">
+
+              <Card.Body>
                 <h5 className="mb-1">{project.name}</h5>
-                <p style={{ opacity: 0.8, minHeight: 40 }}>
+                <p className="text-muted" style={{ minHeight: 40 }}>
                   {project.description}
                 </p>
 
@@ -254,6 +346,7 @@ export default function Projects() {
 
                 <div className="d-flex justify-content-between">
                   <div>
+                    {/* EDIT */}
                     <Button
                       size="sm"
                       variant="outline-secondary"
@@ -266,19 +359,18 @@ export default function Projects() {
                       <Edit size={12} />
                     </Button>
 
+                    {/* DELETE */}
                     <Button
                       size="sm"
                       variant="outline-danger"
-                      onClick={() => {
-                        setCurrentProject(project);
-                        setShowDelete(true);
-                      }}
+                      onClick={() => askDeleteProject(project)}
                     >
                       <Trash2 size={12} />
                     </Button>
                   </div>
 
                   <div>
+                    {/* OPEN */}
                     <OverlayTrigger
                       placement="top"
                       overlay={<Tooltip>Open Project</Tooltip>}
@@ -286,23 +378,28 @@ export default function Projects() {
                       <Button
                         size="sm"
                         variant="outline-primary"
-                        onClick={() => {
-                          window.location.href = `/project/${project.id}`;
-                        }}
+                        onClick={() =>
+                          (window.location.href = `/project/${project.id}`)
+                        }
                       >
                         Open
                       </Button>
                     </OverlayTrigger>
 
+                    {/* PERMISSION */}
                     <OverlayTrigger
                       placement="top"
-                      overlay={<Tooltip>Check / Grant Access</Tooltip>}
+                      overlay={<Tooltip>Grant Permission</Tooltip>}
                     >
                       <Button
                         size="sm"
                         variant="outline-warning"
                         className="ms-2"
-                        onClick={() => handleGrantPermissionForProject(project)}
+                        onClick={() =>
+                          project.folderHandle?.requestPermission({
+                            mode: "readwrite",
+                          })
+                        }
                       >
                         <Lock size={12} />
                       </Button>
@@ -315,27 +412,15 @@ export default function Projects() {
         ))}
       </Row>
 
-      {/* Add/Edit Modal */}
+      {/* ADD/EDIT PROJECT MODAL */}
       <Modal show={showEdit} onHide={() => setShowEdit(false)} centered>
-        <Modal.Header
-          closeButton
-          style={{
-            backgroundColor: themeColors.cardBg,
-            color: themeColors.text,
-            borderColor: themeColors.border,
-          }}
-        >
+        <Modal.Header closeButton>
           <Modal.Title>
             {currentProject?.id ? "Edit Project" : "Add Project"}
           </Modal.Title>
         </Modal.Header>
-        <Modal.Body
-          style={{
-            backgroundColor: themeColors.cardBg,
-            color: themeColors.text,
-            borderColor: themeColors.border,
-          }}
-        >
+
+        <Modal.Body>
           <Form onSubmit={handleSaveProject}>
             <Form.Group className="mb-3">
               <Form.Label>Project Name</Form.Label>
@@ -352,7 +437,7 @@ export default function Projects() {
               />
             </Form.Group>
 
-            <Form.Group className="mb-3">
+            <Form.Group>
               <Form.Label>Description</Form.Label>
               <Form.Control
                 as="textarea"
@@ -367,32 +452,26 @@ export default function Projects() {
               />
             </Form.Group>
 
-            <Form.Group className="mb-3">
+            <Form.Group className="mt-3">
               <Form.Label>Project Folder</Form.Label>
               <div className="d-flex align-items-center gap-2">
-                <Button
-                  variant="outline-primary"
-                  size="sm"
-                  onClick={handleSelectFolder}
-                >
+                <Button variant="outline-primary" size="sm" onClick={handleSelectFolder}>
                   Select Folder
                 </Button>
-                <div>
-                  {currentProject?.folderHandle ? (
-                    <span>✅ {currentProject.folderHandle.name}</span>
-                  ) : (
-                    <span>No folder selected</span>
-                  )}
-                  {permissionNeeded && (
-                    <div className="text-danger small mt-1">
-                      Write permission required
-                    </div>
-                  )}
-                </div>
+
+                <span>
+                  {currentProject?.folderHandle
+                    ? `📁 ${currentProject.folderHandle.name}`
+                    : "No folder selected"}
+                </span>
+
+                {permissionNeeded && (
+                  <span className="text-danger small">Permission required</span>
+                )}
               </div>
             </Form.Group>
 
-            <div className="d-flex justify-content-end">
+            <div className="d-flex justify-content-end mt-4">
               <Button
                 variant="secondary"
                 className="me-2"
@@ -400,53 +479,13 @@ export default function Projects() {
               >
                 Cancel
               </Button>
+
               <Button variant="primary" type="submit">
                 Save Project
               </Button>
             </div>
           </Form>
         </Modal.Body>
-      </Modal>
-
-      {/* Delete Modal */}
-      <Modal show={showDelete} onHide={() => setShowDelete(false)} centered>
-        <Modal.Header
-          closeButton
-          style={{
-            backgroundColor: themeColors.cardBg,
-            color: themeColors.text,
-            borderColor: themeColors.border,
-          }}
-        >
-          <Modal.Title>Confirm Deletion</Modal.Title>
-        </Modal.Header>
-        <Modal.Body
-          style={{
-            backgroundColor: themeColors.cardBg,
-            color: themeColors.text,
-            borderColor: themeColors.border,
-          }}
-        >
-          Are you sure you want to delete Project:{" "}
-          <strong>{currentProject?.name}</strong>?
-          <div className="text-danger small mt-2">
-            This will delete all datasets, images, annotations, and jobs.
-          </div>
-        </Modal.Body>
-        <Modal.Footer
-          style={{
-            backgroundColor: themeColors.cardBg,
-            color: themeColors.text,
-            borderColor: themeColors.border,
-          }}
-        >
-          <Button variant="secondary" onClick={() => setShowDelete(false)}>
-            Cancel
-          </Button>
-          <Button variant="danger" onClick={handleDeleteProject}>
-            Delete
-          </Button>
-        </Modal.Footer>
       </Modal>
     </div>
   );

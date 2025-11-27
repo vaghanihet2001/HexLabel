@@ -3,12 +3,13 @@ import React, { useState, useEffect } from "react";
 import { Tabs, Tab, Button } from "react-bootstrap";
 import { useParams, useNavigate } from "react-router-dom";
 import { useTheme } from "../components/ThemeContext";
+
 import UploadImagesPage from "./dataset/UploadImagesPage";
 import AnnotationTasksPage from "./dataset/AnnotationTasksPage";
 import DatasetGalleryPage from "./dataset/DatasetGalleryPage";
 import VersionsPage from "./dataset/VersionsPage";
-import AnalyticsPage from "./dataset/AnalyticsPage";
 import ClassesTagsPage from "./dataset/ClassesTagsPage";
+
 import { db } from "../utils/db";
 
 export default function DatasetPage() {
@@ -18,26 +19,42 @@ export default function DatasetPage() {
 
   const [activeTab, setActiveTab] = useState("upload");
   const [jobRefresh, setJobRefresh] = useState(0);
+
+  const [project, setProject] = useState(null);
   const [dataset, setDataset] = useState(null);
 
-  // ✅ Load dataset info safely
+  // --------------------------------------------
+  // LOAD PROJECT + DATASET
+  // --------------------------------------------
   useEffect(() => {
-    const loadDataset = async () => {
-      try {
-        const ds = await db.datasets.get(datasetId);
-        setDataset(ds);
-        console.log("📦 Loaded dataset:", datasetId, ds);
-      } catch (err) {
-        console.error("❌ Failed to load dataset:", err);
-      }
-    };
-    loadDataset();
-  }, [datasetId]);
+    const loadData = async () => {
+      const proj = await db.projects.get(projectId);
+      const ds = await db.datasets.get(datasetId);
 
+      setProject(proj);
+      setDataset(ds);
+    };
+    loadData();
+  }, [projectId, datasetId]);
+
+  // --------------------------------------------
+  // JOB CREATED → SWITCH TO JOB TAB
+  // --------------------------------------------
   const handleJobCreated = () => {
-    setActiveTab("tasks");
-    setJobRefresh((prev) => prev + 1);
+    setActiveTab("jobs");
+    setJobRefresh((p) => p + 1);
   };
+
+  // --------------------------------------------
+  // LOADING UI
+  // --------------------------------------------
+  if (!project || !dataset) {
+    return (
+      <div className="p-4" style={{ color: themeColors.text }}>
+        Loading dataset...
+      </div>
+    );
+  }
 
   return (
     <div
@@ -46,14 +63,12 @@ export default function DatasetPage() {
         backgroundColor: themeColors.background,
         color: themeColors.text,
         height: "calc(100vh - 60px)",
-        transition: "background-color 0.3s ease",
         display: "flex",
         flexDirection: "column",
-        gap: "0.5rem",
       }}
     >
-      {/* 🔙 Header */}
-      <div className="d-flex justify-content-between align-items-center mb-4">
+      {/* HEADER */}
+      <div className="d-flex justify-content-between align-items-center mb-3">
         <div className="d-flex align-items-center">
           <Button
             variant="outline-secondary"
@@ -67,45 +82,92 @@ export default function DatasetPage() {
           >
             ← Back
           </Button>
+
           <h3 className="fw-semibold mb-0" style={{ color: themeColors.text }}>
-            Dataset: {dataset?.name || datasetId}
+            Dataset: {dataset.name}
           </h3>
         </div>
       </div>
 
-      {/* 🧩 Tabs */}
-      <Tabs
-        activeKey={activeTab}
-        onSelect={(k) => setActiveTab(k)}
-        className="mb-4"
-        justify
+      {/* MAIN TAB SYSTEM */}
+      <div
         style={{
-          height: "60px",
-          background: themeColors.cardBg,
-          borderRadius: 8,
+          backgroundColor: themeColors.cardBg,
+          borderRadius: "8px",
           padding: "0.5rem",
-          borderColor: themeColors.border,
+          border: `1px solid ${themeColors.border}`,
+          flexGrow: 1,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
-        <Tab eventKey="upload" title="📤 Upload Images">
-          <UploadImagesPage datasetId={datasetId} onJobCreated={handleJobCreated} />
-        </Tab>
-        <Tab eventKey="tasks" title="🧩 Annotation Tasks">
-          <AnnotationTasksPage datasetId={datasetId} jobRefresh={jobRefresh} />
-        </Tab>
-        <Tab eventKey="dataset" title="🖼 Dataset">
-          <DatasetGalleryPage datasetId={datasetId} />
-        </Tab>
-        <Tab eventKey="versions" title="📦 Versions">
-          <VersionsPage datasetId={datasetId} />
-        </Tab>
-        <Tab eventKey="analytics" title="📊 Analytics">
-          <AnalyticsPage datasetId={datasetId} />
-        </Tab>
-        <Tab eventKey="classes" title="🏷 Classes & Tags">
-          <ClassesTagsPage datasetId={datasetId} />
-        </Tab>
-      </Tabs>
+        {/* TAB BAR */}
+        <Tabs
+          activeKey={activeTab}
+          onSelect={(k) => setActiveTab(k)}
+          justify
+          style={{
+            borderBottom: `1px solid ${themeColors.border}`,
+          }}
+        >
+          <Tab eventKey="upload" title="📤 Upload Images" />
+          <Tab eventKey="jobs" title="🧩 Jobs" />
+          <Tab eventKey="dataset" title="🖼 Dataset" />
+          <Tab eventKey="versions" title="📦 Versions" />
+          <Tab eventKey="classes" title="🏷 Classes & Tags" />
+        </Tabs>
+
+        {/* TAB CONTENT */}
+        <div style={{ flexGrow: 1, overflowY: "auto" }}>
+          {activeTab === "upload" && (
+            <UploadImagesPage
+              dataset={dataset}
+              project={project}
+              datasetId={dataset.id}
+              projectId={project.id}
+              onJobCreated={handleJobCreated}
+            />
+          )}
+
+          {activeTab === "jobs" && (
+            <AnnotationTasksPage
+              dataset={dataset}
+              project={project}
+              datasetId={dataset.id}
+              projectId={project.id}
+              jobRefresh={jobRefresh}
+            />
+          )}
+
+          {activeTab === "dataset" && (
+            <DatasetGalleryPage
+              dataset={dataset}
+              project={project}
+              datasetId={dataset.id}
+              projectId={project.id}
+            />
+          )}
+
+          {activeTab === "versions" && (
+            <VersionsPage
+              dataset={dataset}
+              project={project}
+              datasetId={dataset.id}
+              projectId={project.id}
+            />
+          )}
+
+          {activeTab === "classes" && (
+            <ClassesTagsPage
+              dataset={dataset}
+              project={project}
+              datasetId={dataset.id}
+              projectId={project.id}
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
