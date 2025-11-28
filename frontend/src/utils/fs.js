@@ -223,3 +223,28 @@ export async function syncProjectToIndexedDB(projectFolderHandle, upsertProject 
 
   return { project: toStoreProject, datasets: diskDatasets };
 }
+
+
+// Write job metadata inside /jobs/
+export async function writeJobFile(datasetHandle, job) {
+  const jobsFolder = await datasetHandle.getDirectoryHandle("jobs", { create: true });
+
+  const fh = await jobsFolder.getFileHandle(`${job.id}.json`, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(JSON.stringify(job, null, 2));
+  await writable.close();
+}
+
+// Read job file
+export async function readJobFile(datasetHandle, jobId) {
+  const jobsFolder = await datasetHandle.getDirectoryHandle("jobs");
+  const fh = await jobsFolder.getFileHandle(`${jobId}.json`);
+  const file = await fh.getFile();
+  return JSON.parse(await file.text());
+}
+
+// Delete job file
+export async function deleteJobFile(datasetHandle, jobId) {
+  const jobsFolder = await datasetHandle.getDirectoryHandle("jobs");
+  await jobsFolder.removeEntry(`${jobId}.json`);
+}

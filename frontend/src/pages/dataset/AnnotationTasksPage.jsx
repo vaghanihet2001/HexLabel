@@ -1,208 +1,349 @@
+// frontend/src/pages/dataset/AnnotationTasksPage.jsx
 import React, { useEffect, useState } from "react";
 import { Card, Button, Spinner } from "react-bootstrap";
-import { db } from "../../utils/db";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useTheme } from "../../components/ThemeContext";
+import AppModal from "../../components/AppModal";
+
 import { Trash2, Play, CheckCircle, PauseCircle } from "lucide-react";
 
-export default function AnnotationTasksPage({ datasetId, jobRefresh }) {
+import { db } from "../../utils/db";
+import {
+  readDatasetMetadata,
+  writeDatasetMetadata,
+  writeJobFile,
+  deleteJobFile,
+} from "../../utils/fs";
+
+export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
+  const datasetId = dataset?.id;
+  const projectId = project?.id;
   const { themeColors } = useTheme();
   const navigate = useNavigate();
-  const { projectId } = useParams();
 
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // 🔁 Load jobs when datasetId or jobRefresh changes
-  useEffect(() => {
-    const loadJobs = async () => {
-      setLoading(true);
-      try {
-        const all = await db.jobs?.where("datasetId").equals(datasetId).toArray();
-        setJobs(all || []);
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadJobs();
-  }, [datasetId, jobRefresh]);
+  // Modal state
+  const [modal, setModal] = useState({
+    show: false,
+    type: "info",
+    title: "",
+    message: "",
+    confirmText: "OK",
+    cancelText: "Cancel",
+    onConfirm: null,
+    autoClose: false,
+  });
 
-  // 🔄 Update job status
-  const updateJobStatus = async (id, newStatus) => {
-    await db.jobs.update(id, { status: newStatus });
-    setJobs((prev) =>
-      prev.map((job) => (job.id === id ? { ...job, status: newStatus } : job))
-    );
+  const openModal = (d) => setModal({ ...modal, ...d, show: true });
+  const closeModal = () => setModal({ ...modal, show: false, onConfirm: null });
+
+  // Get dataset folder
+  const getDatasetFolder = async () => {
+    if (dataset.folderHandle) return dataset.folderHandle;
+    if (project.folderHandle) {
+      return await project.folderHandle.getDirectoryHandle(dataset.name);
+    }
+    return null;
   };
 
-  // 🖼 Attach jobId to images when job starts (if not already)
-  const attachImagesToJob = async (job) => {
+  // ------------------------------
+  // LOAD JOBS
+  // ------------------------------
+  useEffect(() => {
+    if (!datasetId) return;
+    let mounted = true;
+
+    const load = async () => {
+      setLoading(true);
+      try {
+        const list = await db.jobs.where("datasetId").equals(datasetId).toArray();
+
+        // Attach dynamic image counts
+        for (const job of list) {
+          job.imageCount = await db.images.where("jobId").equals(job.id).count();
+        }
+
+        if (mounted) setJobs(list);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    load();
+    return () => (mounted = false);
+  }, [datasetId, jobRefresh]);
+
+  // ------------------------------
+  // UPDATE DATASET METADATA.JSON
+  // ------------------------------
+  const updateMetadataJobEntry = async (jobId, patch) => {
     try {
-      // Get all images by datasetId
-      const datasetImages = await db.images
-        .where("datasetId")
-        .equals(job.datasetId)
-        .toArray();
+      const folder = await getDatasetFolder();
+      if (!folder) return;
 
-      // Filter only images belonging to this job (imageIds)
-      const jobImages = datasetImages.filter((img) =>
-        job.imageIds.includes(img.id)
-      );
+      const meta = (await readDatasetMetadata(folder)) || {};
+      meta.jobs = meta.jobs || [];
 
-      // Update them to include jobId (if not already set)
-      await Promise.all(
-        jobImages.map((img) =>
-          db.images.update(img.id, { jobId: job.id }).catch(() => {})
-        )
-      );
+      const idx = meta.jobs.findIndex((j) => j.id === jobId);
+      if (idx !== -1) {
+        meta.jobs[idx] = { ...meta.jobs[idx], ...patch };
+      }
 
-      console.log(`✅ Linked ${jobImages.length} images to job ${job.id}`);
+      await writeDatasetMetadata(folder, meta);
     } catch (err) {
-      console.error("❌ Failed to attach images to job:", err);
+      console.error("Failed to update dataset metadata:", err);
     }
   };
 
-  // ❌ Delete job
-  const deleteJob = async (id) => {
-    if (!confirm("Delete this job?")) return;
-    await db.jobs.delete(id);
-    setJobs((prev) => prev.filter((j) => j.id !== id));
+  // ------------------------------
+  // UPDATE JOB STATUS + JOB FILE
+  // ------------------------------
+  const updateJobStatus = async (job, status) => {
+    await db.jobs.update(job.id, { status });
+
+    // update metadata.json
+    await updateMetadataJobEntry(job.id, { status });
+
+    // update job file
+    try {
+      const folder = await getDatasetFolder();
+      if (folder) {
+        const updatedJob = { ...job, status };
+        await writeJobFile(folder, updatedJob);
+      }
+    } catch (err) {
+      console.error("Failed to update job file:", err);
+    }
+
+    // update UI
+    setJobs((prev) =>
+      prev.map((j) => (j.id === job.id ? { ...j, status } : j))
+    );
   };
 
-  // 🧱 Single Job Card
+  // ------------------------------
+  // ATTACH IMAGES TO JOB
+  // ------------------------------
+  const attachImages = async (job) => {
+    const imgs = await db.images.where("datasetId").equals(datasetId).toArray();
+    const needed = imgs.filter((i) => job.imageIds.includes(i.id));
+    for (const img of needed) {
+      await db.images.update(img.id, { jobId: job.id });
+    }
+  };
+
+  // ------------------------------
+  // DELETE JOB + DELETE JOB FILE
+  // ------------------------------
+  const askDeleteJob = (job) => {
+    openModal({
+      type: "confirm",
+      title: "Delete Job?",
+      message: `Delete "${job.name}"?`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        try {
+          // Unassign images
+          await db.images.where("jobId").equals(job.id).modify({ jobId: null });
+
+          // Delete job from DB
+          await db.jobs.delete(job.id);
+
+          const folder = await getDatasetFolder();
+
+          // Remove from dataset.json
+          if (folder) {
+            const meta = (await readDatasetMetadata(folder)) || {};
+            meta.jobs = (meta.jobs || []).filter((j) => j.id !== job.id);
+            await writeDatasetMetadata(folder, meta);
+
+            // Delete job file
+            try {
+              await deleteJobFile(folder, job.id);
+            } catch (err) {
+              console.warn("Failed to delete job file:", err);
+            }
+          }
+
+          // Update UI
+          setJobs((prev) => prev.filter((j) => j.id !== job.id));
+
+          return true;
+        } catch (err) {
+          console.error("Delete job failed:", err);
+          openModal({
+            type: "error",
+            title: "Error",
+            message: "Failed to delete job.",
+          });
+          return false;
+        }
+      },
+      autoClose: true,
+    });
+  };
+
+  // ------------------------------
+  // START JOB
+  // ------------------------------
+  const startJob = async (job) => {
+    await updateJobStatus(job, "in_progress");
+    await attachImages(job);
+
+    // Navigate to annotation UI
+    navigate(`/annotate/${projectId}/${datasetId}/${job.id}`);
+  };
+
+  // ------------------------------
+  // MARK COMPLETE
+  // ------------------------------
+  const markComplete = (job) => {
+    openModal({
+      type: "confirm",
+      title: "Complete?",
+      message: `Mark "${job.name}" as completed?`,
+      confirmText: "Complete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        await updateJobStatus(job, "completed");
+        return true;
+      },
+      autoClose: true,
+    });
+  };
+
+  // ------------------------------
+  // JOB CARD COMPONENT
+  // ------------------------------
   const JobCard = ({ job }) => (
     <Card
       className="mb-3 shadow-sm"
       style={{
-        backgroundColor: themeColors.cardBg,
+        background: themeColors.cardBg,
         color: themeColors.text,
         border: `1px solid ${themeColors.border}`,
       }}
     >
       <Card.Body>
         <Card.Title>{job.name}</Card.Title>
-        <Card.Subtitle
-          className="mb-2"
-          style={{ fontSize: "0.85rem", color: themeColors.subtleText }}
-        >
+        <Card.Subtitle className="mb-2" style={{ color: themeColors.subtleText }}>
           {new Date(job.createdAt).toLocaleString()}
         </Card.Subtitle>
-        <p style={{ fontSize: "0.85rem" }}>Images: {job.imageIds?.length || 0}</p>
+
+        <p>Images: {job.imageCount}</p>
 
         <div className="d-flex gap-2 flex-wrap">
-          {/* 🟢 Not Started */}
+          {/* Start */}
           {job.status === "not_started" && (
-            <Button
-              size="sm"
-              variant="success"
-              onClick={async () => {
-                await updateJobStatus(job.id, "in_progress");
-                await attachImagesToJob(job);
-                navigate(`/annotate/${projectId}/${datasetId}/${job.id}`);
-              }}
-            >
-              <Play size={14} className="me-1" /> Start
+            <Button size="sm" variant="success" onClick={() => startJob(job)}>
+              <Play size={14} /> Start
             </Button>
           )}
 
-          {/* 🟡 In Progress */}
+          {/* In progress */}
           {job.status === "in_progress" && (
             <>
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => navigate(`/annotate/${projectId}/${datasetId}/${job.id}`)}
+                onClick={() =>
+                  navigate(`/annotate/${projectId}/${datasetId}/${job.id}`)
+                }
               >
-                <PauseCircle size={14} className="me-1" /> Resume
+                <PauseCircle size={14} /> Resume
               </Button>
               <Button
                 size="sm"
                 variant="outline-success"
-                onClick={() => updateJobStatus(job.id, "completed")}
+                onClick={() => markComplete(job)}
               >
-                <CheckCircle size={14} className="me-1" /> Mark Complete
+                <CheckCircle size={14} /> Complete
               </Button>
             </>
           )}
 
-          {/* ✅ Completed */}
+          {/* Completed */}
           {job.status === "completed" && (
             <Button
               size="sm"
               variant="outline-success"
-              onClick={() => navigate(`/annotate/${projectId}/${datasetId}/${job.id}`)}
+              onClick={() =>
+                navigate(`/annotate/${projectId}/${datasetId}/${job.id}`)
+              }
             >
               View
             </Button>
           )}
 
-          {/* ❌ Delete */}
+          {/* Delete */}
           <Button
             size="sm"
             variant="outline-danger"
-            onClick={() => deleteJob(job.id)}
+            onClick={() => askDeleteJob(job)}
           >
-            <Trash2 size={14} className="me-1" /> Delete
+            <Trash2 size={14} /> Delete
           </Button>
         </div>
       </Card.Body>
     </Card>
   );
 
-  // 🗂 Section Layout
-  const Section = ({ title, jobs }) => (
-    <div style={{ flex: 1, minWidth: "300px" }}>
-      <h5
-        style={{
-          borderBottom: `2px solid ${themeColors.primary}`,
-          color: themeColors.text,
-          paddingBottom: "0.5rem",
-        }}
-      >
-        {title}
-      </h5>
-      {jobs.length === 0 ? (
-        <p style={{ opacity: 0.6, marginTop: "1rem" }}>No jobs here.</p>
-      ) : (
-        jobs.map((job) => <JobCard key={job.id} job={job} />)
-      )}
-    </div>
-  );
-
-  // ⏳ Loader
+  // ------------------------------
+  // LOADING UI
+  // ------------------------------
   if (loading)
     return (
-      <div
-        style={{
-          height: "60vh",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <Spinner animation="border" role="status" />
+      <div style={{ height: "60vh", display: "flex", justifyContent: "center", alignItems: "center" }}>
+        <Spinner animation="border" />
       </div>
     );
 
-  // 🧩 Group jobs by status
   const notStarted = jobs.filter((j) => j.status === "not_started");
   const inProgress = jobs.filter((j) => j.status === "in_progress");
   const completed = jobs.filter((j) => j.status === "completed");
 
-  // 🎨 Render layout
   return (
     <div
       className="d-flex flex-wrap gap-4"
       style={{
-        minHeight: "70vh",
-        backgroundColor: themeColors.background,
         padding: "1rem",
-        borderRadius: 12,
+        background: themeColors.background,
       }}
     >
-      <Section title="🕓 Not Started" jobs={notStarted} />
-      <Section title="🚧 In Progress" jobs={inProgress} />
-      <Section title="✅ Completed" jobs={completed} />
+      <AppModal {...modal} show={modal.show} onClose={closeModal} />
+
+      {/* Not Started */}
+      <div style={{ flex: 1, minWidth: 300 }}>
+        <h5 style={{ borderBottom: `2px solid ${themeColors.primary}` }}>🕓 Not Started</h5>
+        {notStarted.length === 0 ? (
+          <p>No jobs</p>
+        ) : (
+          notStarted.map((job) => <JobCard key={job.id} job={job} />)
+        )}
+      </div>
+
+      {/* In Progress */}
+      <div style={{ flex: 1, minWidth: 300 }}>
+        <h5 style={{ borderBottom: `2px solid ${themeColors.primary}` }}>🚧 In Progress</h5>
+        {inProgress.length === 0 ? (
+          <p>No jobs</p>
+        ) : (
+          inProgress.map((job) => <JobCard key={job.id} job={job} />)
+        )}
+      </div>
+
+      {/* Completed */}
+      <div style={{ flex: 1, minWidth: 300 }}>
+        <h5 style={{ borderBottom: `2px solid ${themeColors.primary}` }}>✅ Completed</h5>
+        {completed.length === 0 ? (
+          <p>No jobs</p>
+        ) : (
+          completed.map((job) => <JobCard key={job.id} job={job} />)
+        )}
+      </div>
     </div>
   );
 }

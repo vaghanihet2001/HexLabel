@@ -1,3 +1,5 @@
+// frontend/src/pages/Projects.jsx
+
 import React, { useEffect, useState } from "react";
 import {
   Card,
@@ -27,6 +29,9 @@ import {
 import { db } from "../utils/db";
 import { deleteProject } from "../utils/cleanup";
 
+// ⭐ NEW – DB REBUILD SCRIPT
+import { rebuildDatabaseFromProject } from "../utils/rebuild";
+
 export default function Projects() {
   const { themeColors } = useTheme();
 
@@ -38,7 +43,7 @@ export default function Projects() {
   const [loading, setLoading] = useState(false);
 
   // -----------------------------
-  // GLOBAL APP MODAL STATE
+  // GLOBAL MODAL
   // -----------------------------
   const [modal, setModal] = useState({
     show: false,
@@ -51,7 +56,6 @@ export default function Projects() {
     autoClose: false,
   });
 
-  // FIXED — no more leftover props
   const openModal = (data) => {
     setModal({
       show: true,
@@ -74,11 +78,13 @@ export default function Projects() {
     }));
 
   // -----------------------------
-  // LOAD PROJECTS
+  // LOAD PROJECTS (DB → UI)
   // -----------------------------
   const reloadProjects = async () => {
+    const list = await db.projects.toArray();
+
     const projectsWithCounts = await Promise.all(
-      (await db.projects.toArray()).map(async (proj) => {
+      list.map(async (proj) => {
         const datasetCount = await db.datasets
           .where("projectId")
           .equals(proj.id)
@@ -96,7 +102,7 @@ export default function Projects() {
   }, []);
 
   // -----------------------------
-  // SELECT FOLDER
+  // SELECT FOLDER FOR NEW PROJECT
   // -----------------------------
   const handleSelectFolder = async () => {
     try {
@@ -108,7 +114,7 @@ export default function Projects() {
         return openModal({
           type: "error",
           title: "Permission Required",
-          message: "Write permission is required to save project files.",
+          message: "Write permission is required.",
         });
       }
 
@@ -117,12 +123,12 @@ export default function Projects() {
         folderHandle: folder,
       }));
     } catch (err) {
-      console.warn("Folder select canceled:", err);
+      console.warn("Folder selection canceled:", err);
     }
   };
 
   // -----------------------------
-  // SAVE METADATA FILE
+  // WRITE HEXLABEL PROJECT FILE
   // -----------------------------
   const saveProjectMetadataToDisk = async (project) => {
     try {
@@ -156,7 +162,7 @@ export default function Projects() {
   };
 
   // -----------------------------
-  // SAVE PROJECT
+  // SAVE / EDIT PROJECT
   // -----------------------------
   const handleSaveProject = async (e) => {
     e.preventDefault();
@@ -202,6 +208,7 @@ export default function Projects() {
 
   // -----------------------------
   // LOAD EXISTING PROJECT
+  // (Rebuild DB here if needed)
   // -----------------------------
   const handleLoadProject = async () => {
     try {
@@ -218,6 +225,7 @@ export default function Projects() {
         });
       }
 
+      // --- LOAD hexlabel.project.json ---
       let metaFile;
       try {
         metaFile = await folder.getFileHandle("hexlabel.project.json");
@@ -231,19 +239,19 @@ export default function Projects() {
 
       const data = JSON.parse(await (await metaFile.getFile()).text());
 
-      await db.projects.put({
-        ...data,
-        folderHandle: folder,
-      });
-
-      await reloadProjects();
+      // -----------------------------
+      // ⭐ NEW — FULL DB REBUILD HERE
+      // -----------------------------
+      await rebuildDatabaseFromProject(folder);
 
       openModal({
         type: "success",
         title: "Project Loaded",
         message: `"${data.name}" loaded successfully.`,
       });
-    } catch {
+
+      await reloadProjects();
+    } catch (err) {
       openModal({
         type: "error",
         title: "Load Failed",
@@ -255,7 +263,7 @@ export default function Projects() {
   };
 
   // -----------------------------
-  // DELETE PROJECT (CONFIRM)
+  // DELETE PROJECT
   // -----------------------------
   const askDeleteProject = (project) => {
     setCurrentProject(project);
@@ -263,7 +271,7 @@ export default function Projects() {
     openModal({
       type: "confirm",
       title: "Delete Project?",
-      message: `Are you sure you want to delete "${project.name}"?\nThis will delete all datasets, images, jobs, versions AND the actual filesystem folder.`,
+      message: `Are you sure you want to delete "${project.name}"?\nThis will delete ALL datasets, images, versions, AND the filesystem folder.`,
       confirmText: "Delete",
       cancelText: "Cancel",
       onConfirm: async () => {
@@ -276,11 +284,41 @@ export default function Projects() {
   };
 
   // -----------------------------
+  // OPEN PROJECT BUTTON
+  // (Rebuild → Then navigate)
+  // -----------------------------
+  const handleOpenProject = async (project) => {
+    if (!project.folderHandle) {
+      return openModal({
+        type: "error",
+        title: "Missing Folder",
+        message: "This project has no folder handle. Load it again.",
+      });
+    }
+
+    const perm = await project.folderHandle.requestPermission({
+      mode: "readwrite",
+    });
+
+    if (perm !== "granted") {
+      return openModal({
+        type: "error",
+        title: "Permission Required",
+        message: "Grant permission to access this project folder.",
+      });
+    }
+
+    // ⭐ SAFE — RUN REBUILD BEFORE NAVIGATION
+    await rebuildDatabaseFromProject(project.folderHandle);
+
+    window.location.href = `/project/${project.id}`;
+  };
+
+  // -----------------------------
   // UI
   // -----------------------------
   return (
     <div className="p-4">
-      {/* CUSTOM GLOBAL MODAL */}
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
 
       {/* HEADER */}
@@ -346,7 +384,6 @@ export default function Projects() {
 
                 <div className="d-flex justify-content-between">
                   <div>
-                    {/* EDIT */}
                     <Button
                       size="sm"
                       variant="outline-secondary"
@@ -359,7 +396,6 @@ export default function Projects() {
                       <Edit size={12} />
                     </Button>
 
-                    {/* DELETE */}
                     <Button
                       size="sm"
                       variant="outline-danger"
@@ -370,7 +406,7 @@ export default function Projects() {
                   </div>
 
                   <div>
-                    {/* OPEN */}
+                    {/* OPEN PROJECT (with rebuild) */}
                     <OverlayTrigger
                       placement="top"
                       overlay={<Tooltip>Open Project</Tooltip>}
@@ -378,9 +414,7 @@ export default function Projects() {
                       <Button
                         size="sm"
                         variant="outline-primary"
-                        onClick={() =>
-                          (window.location.href = `/project/${project.id}`)
-                        }
+                        onClick={() => handleOpenProject(project)}
                       >
                         Open
                       </Button>

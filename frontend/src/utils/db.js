@@ -2,44 +2,91 @@ import Dexie from "dexie";
 
 export const db = new Dexie("HexLabelDB");
 
-// ✅ Database schema (string IDs) — version 10
-db.version(10).stores({
+/*
+###########################################################
+#  NEW VERSION 11 — SAFE FORWARD-COMPATIBLE SCHEMA
+#  Fixes: Dexie SchemaError (jobId not indexed)
+#  Adds: jobId index (required by AnnotationTasksPage)
+#  Does NOT break existing DB data (pure additive index)
+###########################################################
+*/
+
+db.version(11).stores({
   projects: "id, name, description, createdAt",
+
   datasets: "id, name, description, type, projectId, createdAt",
+
   datasetVersions: "id, datasetId, versionName, createdAt",
+
   annotations: "id, datasetId, imageId, versionId",
+
+  // jobs stay the same
   jobs: "id, datasetId, name, status, createdAt",
-  images: "id, datasetId, name, createdAt",
+
+  /*
+  --------------------------------------------------------
+  FIXED: images table MUST index jobId
+  Otherwise queries like:
+      db.images.where("jobId")
+  will throw Dexie SchemaError
+  --------------------------------------------------------
+  */
+  images: "id, datasetId, jobId, name, createdAt",
+
   tempImages: "id, datasetId, name, createdAt",
 });
 
-// ❗ Store complex objects that cannot be indexed
-db.projects.mapToClass(class {
-  folderHandle;
-});
+/*
+###########################################################
+#  mapToClass definitions
+#  (unchanged; these do NOT affect indexes)
+###########################################################
+*/
 
-db.datasets.mapToClass(class {
-  folderHandle;
-});
+// Complex objects
+db.projects.mapToClass(
+  class {
+    folderHandle;
+  }
+);
 
-db.images.mapToClass(class {
-  jobId;
-  url;
-});
+db.datasets.mapToClass(
+  class {
+    folderHandle;
+  }
+);
 
-db.jobs.mapToClass(class {
-  imageIds;
-});
+db.images.mapToClass(
+  class {
+    jobId;
+    url;
+  }
+);
 
-db.annotations.mapToClass(class {
-  data;
-});
+db.jobs.mapToClass(
+  class {
+    imageIds;
+  }
+);
 
-db.tempImages.mapToClass(class {
-  url;
-});
+db.annotations.mapToClass(
+  class {
+    data;
+  }
+);
 
-// Init log
+db.tempImages.mapToClass(
+  class {
+    url;
+  }
+);
+
+/*
+###########################################################
+#  DB Init
+###########################################################
+*/
+
 db.on("populate", () => {
   console.log("✅ Database initialized and ready for HexLabel");
 });
@@ -49,7 +96,12 @@ db.open().catch((err) => {
   console.error("❌ Failed to open Dexie DB:", err);
 });
 
-// ID generator
+/*
+###########################################################
+#  ID generator
+###########################################################
+*/
+
 export const generateId = () => {
   if (crypto?.randomUUID) return crypto.randomUUID();
   return "id-" + Math.random().toString(36).substring(2, 11);

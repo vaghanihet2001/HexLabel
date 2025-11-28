@@ -30,10 +30,22 @@ import {
   Trash2,
   Keyboard,
   TagIcon,
-  // added Hand icon
 } from "lucide-react";
 import { db } from "../utils/db";
 import { useTheme } from "../components/ThemeContext";
+import AppModal from "../components/AppModal";
+
+import {
+  readDatasetMetadata,
+  writeDatasetMetadata,
+  writeJobFile,
+  readJobFile,
+  deleteJobFile,
+} from "../utils/fs";
+
+/* ---------------------------
+  Helpers
+--------------------------- */
 
 // Utility to generate color for class
 const colorForLabel = (label) => {
@@ -44,6 +56,9 @@ const colorForLabel = (label) => {
 };
 const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 9);
 
+/* ---------------------------
+  Component
+--------------------------- */
 export default function Annotate() {
   const { projectId, datasetId, jobId } = useParams();
   const navigate = useNavigate();
@@ -95,8 +110,8 @@ export default function Annotate() {
       index: null, // index for corner/vertex
       offset: null, // client offset during move
     },
-    mouse: { cx: 0, cy: 0 }, // client coords
-    hover: { type: "none", annId: null, index: null }, // NEW: for handle hover
+    mouse: { cx: 0, cy: 0 },
+    hover: { type: "none", annId: null, index: null },
   });
 
   // History state for undo/redo
@@ -111,7 +126,25 @@ export default function Annotate() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const classInputRef = useRef(null);
 
-  // helpers: ensure folder permission (same as before)
+  // -----------------------------
+  // AppModal (custom confirm)
+  // -----------------------------
+  const [modal, setModal] = useState({
+    show: false,
+    type: "info",
+    title: "",
+    message: "",
+    confirmText: "OK",
+    cancelText: "Cancel",
+    onConfirm: null,
+    autoClose: false,
+  });
+  const openModal = (d) => setModal({ ...modal, ...d, show: true });
+  const closeModal = () => setModal((m) => ({ ...m, show: false, onConfirm: null }));
+
+  // -----------------------------
+  // helpers: ensure folder permission
+  // -----------------------------
   async function ensureFolderAccess(handle) {
     try {
       if (!handle) return false;
@@ -125,11 +158,180 @@ export default function Annotate() {
     }
   }
 
-  // Helper to reset image transform and resize canvas
+  // helper: resolve dataset folder handle in robust way
+  const resolveDatasetFolder = async () => {
+    if (dataset?.folderHandle) return dataset.folderHandle;
+    if (project?.folderHandle) {
+      try {
+        return await project.folderHandle.getDirectoryHandle(dataset.name);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  /* -----------------------------
+     Filesystem helpers (internal)
+     - writeAnnotationFile (annotations/active/<imageId>.json)
+     - readAnnotationFile
+     - deleteAnnotationFile (active + versions)
+     - deleteImageFile (images/raw/<imageName>)
+     - updateJobFileAfterImageDeletion
+     - updateDatasetJsonJobCounts
+  ----------------------------- */
+
+  const writeAnnotationFile = async (folderHandle, imageId, payload, versionId = null) => {
+    // uses Option B: filename = <imageId>.json
+    if (!folderHandle) return;
+    try {
+      const annotationsHandle = await folderHandle.getDirectoryHandle("annotations", { create: true });
+      if (versionId) {
+        const versionsHandle = await annotationsHandle.getDirectoryHandle("versions", { create: true });
+        const vHandle = await versionsHandle.getDirectoryHandle(versionId, { create: true });
+        const fh = await vHandle.getFileHandle(`${imageId}.json`, { create: true });
+        const w = await fh.createWritable();
+        await w.write(JSON.stringify(payload, null, 2));
+        await w.close();
+      } else {
+        const activeHandle = await annotationsHandle.getDirectoryHandle("active", { create: true });
+        const fh = await activeHandle.getFileHandle(`${imageId}.json`, { create: true });
+        const w = await fh.createWritable();
+        await w.write(JSON.stringify(payload, null, 2));
+        await w.close();
+      }
+    } catch (err) {
+      console.warn("writeAnnotationFile failed:", err);
+    }
+  };
+
+  const readAnnotationFile = async (folderHandle, imageId, versionId = null) => {
+    if (!folderHandle) return null;
+    try {
+      const annotationsHandle = await folderHandle.getDirectoryHandle("annotations");
+      if (versionId) {
+        const versionsHandle = await annotationsHandle.getDirectoryHandle("versions");
+        const vHandle = await versionsHandle.getDirectoryHandle(versionId);
+        const fh = await vHandle.getFileHandle(`${imageId}.json`);
+        const file = await fh.getFile();
+        return JSON.parse(await file.text());
+      } else {
+        const activeHandle = await annotationsHandle.getDirectoryHandle("active");
+        const fh = await activeHandle.getFileHandle(`${imageId}.json`);
+        const file = await fh.getFile();
+        return JSON.parse(await file.text());
+      }
+    } catch (err) {
+      // file not found or other error
+      return null;
+    }
+  };
+
+  const deleteAnnotationFile = async (folderHandle, imageId) => {
+    if (!folderHandle) return;
+    try {
+      const annotationsHandle = await folderHandle.getDirectoryHandle("annotations", { create: false });
+      // delete active
+      try {
+        const activeHandle = await annotationsHandle.getDirectoryHandle("active");
+        await activeHandle.removeEntry(`${imageId}.json`).catch(() => {});
+      } catch {}
+      // delete from all versions (if any)
+      try {
+        const versionsHandle = await annotationsHandle.getDirectoryHandle("versions");
+        for await (const entry of versionsHandle.values()) {
+          if (entry.kind !== "directory") continue;
+          try {
+            const vHandle = await versionsHandle.getDirectoryHandle(entry.name);
+            await vHandle.removeEntry(`${imageId}.json`).catch(() => {});
+          } catch {}
+        }
+      } catch {}
+    } catch (err) {
+      // ignore
+    }
+  };
+
+  const deleteImageFile = async (folderHandle, imageName) => {
+    if (!folderHandle) return;
+    try {
+      const imagesHandle = await folderHandle.getDirectoryHandle("images");
+      const rawHandle = await imagesHandle.getDirectoryHandle("raw");
+      await rawHandle.removeEntry(imageName).catch(() => {});
+    } catch (err) {
+      console.warn("deleteImageFile failed:", err);
+    }
+  };
+
+  const updateJobFileAfterImageDeletion = async (folderHandle, removedImageId) => {
+    if (!folderHandle) return;
+    try {
+      const jobsHandle = await folderHandle.getDirectoryHandle("jobs");
+      for await (const entry of jobsHandle.values()) {
+        if (entry.kind !== "file" || !entry.name.endsWith(".json")) continue;
+        try {
+          const fh = await jobsHandle.getFileHandle(entry.name);
+          const file = await fh.getFile();
+          const job = JSON.parse(await file.text());
+          const newImageIds = (job.imageIds || []).filter((id) => id !== removedImageId);
+          if (newImageIds.length !== (job.imageIds || []).length) {
+            job.imageIds = newImageIds;
+            // update job file
+            const wfh = await jobsHandle.getFileHandle(entry.name, { create: true });
+            const w = await wfh.createWritable();
+            await w.write(JSON.stringify(job, null, 2));
+            await w.close();
+            // also update DB record
+            await db.jobs.update(job.id, { imageIds: newImageIds });
+          }
+        } catch (err) {
+          // skip invalid job file
+        }
+      }
+    } catch (err) {
+      // no jobs folder or other error
+    }
+  };
+
+  const updateDatasetJsonJobCounts = async (folderHandle) => {
+    if (!folderHandle) return;
+    try {
+      const meta = (await readDatasetMetadata(folderHandle)) || {};
+      meta.jobs = meta.jobs || [];
+      // For each job in dataset.json, recompute imageCount from file system or db
+      for (let i = 0; i < meta.jobs.length; i++) {
+        const j = meta.jobs[i];
+        // prefer DB job row if present
+        const dbJob = await db.jobs.get(j.id);
+        if (dbJob) {
+          meta.jobs[i].imageCount = (dbJob.imageIds || []).length;
+          meta.jobs[i].status = dbJob.status;
+        } else {
+          // fallback: try to read job file
+          try {
+            const jobsHandle = await folderHandle.getDirectoryHandle("jobs");
+            const fh = await jobsHandle.getFileHandle(`${j.id}.json`);
+            const file = await fh.getFile();
+            const job = JSON.parse(await file.text());
+            meta.jobs[i].imageCount = (job.imageIds || []).length;
+            meta.jobs[i].status = job.status || "not_started";
+          } catch {
+            meta.jobs[i].imageCount = 0;
+          }
+        }
+      }
+      await writeDatasetMetadata(folderHandle, meta);
+    } catch (err) {
+      console.warn("updateDatasetJsonJobCounts failed:", err);
+    }
+  };
+
+  /* -----------------------------
+     Reset image / canvas helpers
+  ----------------------------- */
   const resetImageAndCanvas = () => {
     panRef.current = { x: 0, y: 0 };
     setZoom(1);
-    // Resize canvas
     if (canvasRef.current && containerRef.current) {
       const canvas = canvasRef.current;
       const container = containerRef.current;
@@ -137,14 +339,12 @@ export default function Annotate() {
       canvas.width = rect.width;
       canvas.height = rect.height;
     }
-    // Reset image transform
     if (imageRef.current) {
       imageRef.current.style.transform = `translate(0px, 0px) scale(1)`;
       imageRef.current.style.transformOrigin = "center center";
     }
   };
 
-  // Update panel toggle handlers
   const handleLeftPanelToggle = (open) => {
     setLeftPanelOpen(open);
     setTimeout(resetImageAndCanvas, 0);
@@ -154,7 +354,9 @@ export default function Annotate() {
     setTimeout(resetImageAndCanvas, 0);
   };
 
-  // --------------------- LOAD: dataset, job, images, classes ---------------------
+  /* -----------------------------
+     LOAD: dataset, job, images, classes
+  ----------------------------- */
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -166,7 +368,11 @@ export default function Annotate() {
           db.jobs.get(jobId),
         ]);
         if (!ds) {
-          alert("Dataset not found.");
+          openModal({
+            type: "error",
+            title: "Dataset not found",
+            message: "Dataset not found. Returning to project.",
+          });
           navigate(`/project/${projectId}`);
           return;
         }
@@ -174,7 +380,7 @@ export default function Annotate() {
         setDataset(ds);
         setJob(jb || null);
 
-        // load images
+        // load images (job-specific or whole dataset)
         const jobImageIds = jb?.imageIds ?? [];
         const imgs =
           jobImageIds.length > 0
@@ -185,17 +391,19 @@ export default function Annotate() {
         for (const img of imgs) {
           let url = null;
           try {
-            if (ds.folderHandle) {
+            const dsFolder = ds.folderHandle || (proj?.folderHandle ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null) : null);
+
+            if (dsFolder) {
               try {
-                const rawDir = await ds.folderHandle.getDirectoryHandle("raw_images", {
-                  create: false,
-                });
+                // images are stored under images/raw/<name>
+                const imagesDir = await dsFolder.getDirectoryHandle("images");
+                const rawDir = await imagesDir.getDirectoryHandle("raw");
                 const fh = await rawDir.getFileHandle(img.name);
                 const file = await fh.getFile();
                 url = URL.createObjectURL(file);
                 createdUrlsRef.current.add(url);
               } catch (err) {
-                /* fallback */
+                // fallback to stored blob / url
               }
             }
             if (!url && img.file instanceof Blob) {
@@ -213,7 +421,7 @@ export default function Annotate() {
         setImages(resolved);
         setCurrentIdx(0);
 
-        // derive classes from all annotations in DB for this dataset
+        // derive classes from annotations in DB (all dataset annotations)
         const allAnn = await db.annotations.where("datasetId").equals(dsId).toArray();
         const labels = new Map();
         for (const r of allAnn) {
@@ -223,6 +431,7 @@ export default function Annotate() {
             if (!labels.has(name)) labels.set(name, colorForLabel(name));
           }
         }
+
         setClasses(Array.from(labels.entries()).map(([name, color]) => ({ id: uid(), name, color })));
       } catch (err) {
         console.error("Load failed:", err);
@@ -242,14 +451,16 @@ export default function Annotate() {
     };
   }, [projectId, datasetId, jobId]);
 
- // --------------------- ANNOTATIONS REF ---------------------
+  /* -----------------------------
+     ANNOTATIONS REF + autosave wiring
+  ----------------------------- */
   const annotationsRef = useRef(annotations);
   useEffect(() => {
     annotationsRef.current = annotations;
-    scheduleSave(); // schedule autosave whenever annotations change
+    scheduleSave();
   }, [annotations]);
 
-  // --------------------- LOAD annotations for current image ---------------------
+  // load annotations for current image (DB preferred, fallback to FS active)
   useEffect(() => {
     const loadForImage = async () => {
       const img = images[currentIdx];
@@ -259,18 +470,35 @@ export default function Annotate() {
       }
 
       try {
+        // First try DB
         const rec = await db.annotations
-          .where({ datasetId: dsId, imageName: img.name })
+          .where("datasetId")
+          .equals(dsId)
+          .and((a) => a.imageName === img.name)
           .first();
-        const data = rec?.data ?? [];
+
+        let data = rec?.data ?? null;
+
+        // If DB empty, try reading FS active annotation file (by image id)
+        if (!data) {
+          try {
+            const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+            if (dsFolder) {
+              const fileObj = await readAnnotationFile(dsFolder, img.id, null);
+              if (fileObj?.annotations) data = fileObj.annotations;
+            }
+          } catch (err) {
+            // ignore
+          }
+        }
 
         // normalize annotations, add visible flag
-        const normalized = data.map((a, index) => ({
-          id: a.id || index.toString(), // fallback id
+        const normalized = (data || []).map((a, index) => ({
+          id: a.id || index.toString(),
           type: a.type,
           points: a.points,
           className: a.className || "class",
-          color: a.color || "#FF0000", // fallback color
+          color: a.color || colorForLabel(a.className || "class"),
           visible: a.visible !== false,
         }));
 
@@ -287,9 +515,11 @@ export default function Annotate() {
     };
 
     loadForImage();
-  }, [images, currentIdx, dsId]);
+  }, [images, currentIdx, dsId, dataset, project]);
 
-  // --------------------- AUTOSAVE (debounced) ---------------------
+  /* -----------------------------
+     AUTOSAVE (debounced) — writes DB + filesystem
+  ----------------------------- */
   const scheduleSave = useCallback(() => {
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
 
@@ -300,11 +530,14 @@ export default function Annotate() {
       try {
         const payload = {
           datasetId: dsId,
+          imageId: img.id,
           imageName: img.name,
           data: annotationsRef.current,
           updatedAt: new Date().toISOString(),
+          versionId: null, // active annotations (working copy)
         };
 
+        // Upsert DB
         const existing = await db.annotations
           .where("datasetId")
           .equals(dsId)
@@ -318,14 +551,28 @@ export default function Annotate() {
           await db.annotations.add(payload);
         }
 
-        console.log("✅ autosaved:", img.name);
+        // Write filesystem active annotation file (imageId.json)
+        const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+        if (dsFolder) {
+          const filePayload = {
+            imageId: img.id,
+            imageName: img.name,
+            datasetId: dsId,
+            annotations: annotationsRef.current,
+            updatedAt: new Date().toISOString(),
+            versionId: null,
+          };
+          await writeAnnotationFile(dsFolder, img.id, filePayload, null);
+        }
+
+        // console log for debugging
+        // console.log("✅ autosaved:", img.name);
       } catch (err) {
         console.error("❌ Failed autosave:", err);
       }
     }, 800);
-  }, [currentIdx, images, dsId]);
+  }, [currentIdx, images, dsId, dataset, project]);
 
-  // --------------------- EFFECT TO TRIGGER AUTOSAVE ---------------------
   useEffect(() => {
     if (images.length === 0) return;
     scheduleSave();
@@ -335,29 +582,10 @@ export default function Annotate() {
     };
   }, [currentIdx, images, scheduleSave]);
 
-
-  // --------------------- Coordinate helpers ---------------------
-  // Note: imageClientRect relies on the rendered img bounding rect which already
-  // reflects CSS transforms (translate + scale). That makes mapping simpler.
-  const imageClientRect = () => {
-    const imgEl = imageRef.current;
-    if (!imgEl) return null;
-    return imgEl.getBoundingClientRect();
-  };
-  const clientToNormalized = (clientX, clientY) => {
-    const rect = imageClientRect();
-    if (!rect) return null;
-    const x = (clientX - rect.left) / rect.width;
-    const y = (clientY - rect.top) / rect.height;
-    return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
-  };
-  const normalizedToClient = (nx, ny) => {
-    const rect = imageClientRect();
-    if (!rect) return null;
-    return [rect.left + nx * rect.width, rect.top + ny * rect.height];
-  };
-
-  // --------------------- Drawing & render overlay ---------------------
+  /* -----------------------------
+     Canvas drawing, rendering & interactions
+     (unchanged logic mostly; omitted repeated comments for brevity)
+  ----------------------------- */
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -372,18 +600,40 @@ export default function Annotate() {
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
 
-    // helper: convert normalized to canvas-local coords (canvas origin = container top-left)
     const normToCanvas = (nx, ny) => {
-      const rect = imageClientRect();
+      const rect = imageRef.current?.getBoundingClientRect();
       if (!rect) return null;
       const cx = (rect.left - container.getBoundingClientRect().left) + nx * rect.width;
       const cy = (rect.top - container.getBoundingClientRect().top) + ny * rect.height;
       return [cx, cy];
     };
 
+    function drawHandle(ctx, x, y, color) {
+      ctx.beginPath();
+      ctx.fillStyle = "white";
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    function drawHandleHover(ctx, x, y, color) {
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
     const draw = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const rect = imageClientRect();
+      const rect = imageRef.current?.getBoundingClientRect();
       if (!rect) return;
 
       ctx.save();
@@ -392,7 +642,6 @@ export default function Annotate() {
       for (const a of annotations) {
         if (a.visible === false) continue;
         const stroke = a.color || colorForLabel(a.className || "class");
-        // fill with 30% opacity
         ctx.strokeStyle = stroke;
         ctx.lineWidth = a.id === selectedAnnId ? 3 : 2;
         ctx.fillStyle = "rgba(255,255,255,0.30)";
@@ -406,7 +655,7 @@ export default function Annotate() {
           ctx.rect(cx, cy, w, h);
           ctx.fill();
           ctx.stroke();
-          // draw corner handles (white dot inside colored ring)
+
           const corners = [
             [x1, y1],
             [x2, y1],
@@ -415,7 +664,6 @@ export default function Annotate() {
           ];
           corners.forEach((c, i) => {
             const [hx, hy] = normToCanvas(c[0], c[1]);
-            // If hovered handle -> draw ring (hollow) larger
             if (stateRef.current.hover.type === "corner" && stateRef.current.hover.annId === a.id && stateRef.current.hover.index === i) {
               drawHandleHover(ctx, hx, hy, stroke);
             } else {
@@ -434,7 +682,7 @@ export default function Annotate() {
           ctx.closePath();
           ctx.fill();
           ctx.stroke();
-          // vertex handles
+
           for (let i = 0; i < pts.length; i += 2) {
             const [vx, vy] = normToCanvas(pts[i], pts[i + 1]);
             const vidx = i / 2;
@@ -447,13 +695,13 @@ export default function Annotate() {
         }
       }
 
-      // draw in-progress (live) shapes
+      // draw in-progress shapes
       const d = stateRef.current.draw;
       ctx.lineWidth = 2;
       ctx.strokeStyle = "#fff";
       ctx.fillStyle = "rgba(255,255,255,0.30)";
       if (d.inProgress) {
-        if (stateRef.current.draw.mode === "bbox" || (stateRef.current.draw.mode == null && tool === "bbox")) {
+        if (d.mode === "bbox" || (d.mode == null && tool === "bbox")) {
           if (d.start && d.current) {
             const [sx, sy] = d.start;
             const [cxn, cyn] = d.current;
@@ -467,7 +715,7 @@ export default function Annotate() {
             ctx.fill();
             ctx.stroke();
           }
-        } else if (stateRef.current.draw.mode === "poly" || (stateRef.current.draw.mode == null && tool === "poly")) {
+        } else if (d.mode === "poly" || (d.mode == null && tool === "poly")) {
           const pts = d.currentPoly || [];
           if (pts.length >= 2) {
             ctx.beginPath();
@@ -482,7 +730,6 @@ export default function Annotate() {
               ctx.lineTo(mxp, myp);
             }
             ctx.stroke();
-            // draw vertex handles for created vertices
             for (let i = 0; i < pts.length; i += 2) {
               const [vx, vy] = normToCanvas(pts[i], pts[i + 1]);
               drawHandle(ctx, vx, vy, "#fff");
@@ -491,11 +738,10 @@ export default function Annotate() {
         }
       }
 
-      // crosshair with small central white dot and lines a little away from dot
+      // crosshair/dot
       if (crosshair) {
         const m = stateRef.current.mouse;
         if (m && rect) {
-          // translate mouse to canvas-local
           const cRect = container.getBoundingClientRect();
           const localX = m.cx - cRect.left;
           const localY = m.cy - cRect.top;
@@ -503,7 +749,6 @@ export default function Annotate() {
           ctx.strokeStyle = "rgba(255,255,255,1)";
           ctx.lineWidth = 2;
 
-          // draw vertical and horizontal lines leaving a gap of 20px around central dot
           ctx.beginPath();
           ctx.moveTo(localX, 0);
           ctx.lineTo(localX, localY - 20);
@@ -518,7 +763,6 @@ export default function Annotate() {
           ctx.lineTo(canvas.width, localY);
           ctx.stroke();
 
-          // central white dot
           ctx.beginPath();
           ctx.fillStyle = "white";
           ctx.arc(localX, localY, 3, 0, Math.PI * 2);
@@ -526,19 +770,12 @@ export default function Annotate() {
           ctx.restore();
         }
       } else {
-        // when crosshair disabled show small central dot only (still painted above).
-        // But we already draw dot only when crosshair true; if you want dot-only mode, adjust here.
         const m = stateRef.current.mouse;
         if (m && rect) {
-          // translate mouse to canvas-local
           const cRect = container.getBoundingClientRect();
           const localX = m.cx - cRect.left;
           const localY = m.cy - cRect.top;
           ctx.save();
-          ctx.strokeStyle = "rgba(255,255,255,1)";
-          ctx.lineWidth = 2;
-          // central white dot
-          ctx.beginPath();
           ctx.fillStyle = "white";
           ctx.arc(localX, localY, 3, 0, Math.PI * 2);
           ctx.fill();
@@ -548,71 +785,6 @@ export default function Annotate() {
 
       ctx.restore();
     };
-
-    // helpers used above
-    function drawHandle(ctx, x, y, color) {
-      // default handle: small white filled dot with colored ring
-      ctx.beginPath();
-      ctx.fillStyle = "white";
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.arc(x, y, 7, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    function drawHandleHover(ctx, x, y, color) {
-      // hovered handle: hollow ring (bigger), no inner dot
-      ctx.beginPath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
-      ctx.arc(x, y, 10, 0, Math.PI * 2);
-      ctx.stroke();
-      // subtle inner translucent fill to hint hover (optional)
-      ctx.beginPath();
-      ctx.fillStyle = "rgba(255,255,255,0.06)";
-      ctx.arc(x, y, 10, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    function drawCenterDot(ctx, x, y) {
-      ctx.beginPath();
-      ctx.fillStyle = "white";
-      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    function hexToRgba(hex, a) {
-      if (!hex) return `rgba(0,0,0,${a})`;
-      if (hex.startsWith("hsl")) {
-        return hex.replace("hsl(", "hsla(").replace(")", `, ${a})`);
-      }
-      const c = hex.replace("#", "");
-      const bigint = parseInt(c.length === 3 ? c.split("").map((ch) => ch + ch).join("") : c, 16);
-      const r = (bigint >> 16) & 255;
-      const g = (bigint >> 8) & 255;
-      const b = bigint & 255;
-      return `rgba(${r},${g},${b},${a})`;
-    }
-    function polygonCentroid(pts, rect) {
-      if (!pts || pts.length < 6) return null;
-      let area = 0;
-      let cx = 0;
-      let cy = 0;
-      for (let i = 0; i < pts.length; i += 2) {
-        const x0 = pts[i], y0 = pts[i + 1];
-        const j = (i + 2) % pts.length;
-        const x1 = pts[j], y1 = pts[j + 1];
-        const a = x0 * y1 - x1 * y0;
-        area += a;
-        cx += (x0 + x1) * a;
-        cy += (y0 + y1) * a;
-      }
-      if (area === 0) return null;
-      area = area / 2;
-      cx = cx / (6 * area);
-      cy = cy / (6 * area);
-      return normToCanvas(cx, cy);
-    }
 
     let rafId = requestAnimationFrame(function loop() {
       draw();
@@ -625,24 +797,41 @@ export default function Annotate() {
     };
   }, [annotations, selectedAnnId, crosshair, zoom, tool, images, currentIdx]);
 
-  // --------------------- Interaction: pointer events for draw/edit + pan/hover ---------------------
+  /* -----------------------------
+     Pointer event handlers: drawing / editing / pan / hover
+     (kept behavior consistent with your original implementation)
+  ----------------------------- */
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // ensure cursor hidden on annotation stage — we draw crosshair/dot ourselves
-    // but keep default cursor for interactive controls (buttons) — container only covers center stage.
     container.style.cursor = "none";
 
+    const imageClientRect = () => {
+      const imgEl = imageRef.current;
+      if (!imgEl) return null;
+      return imgEl.getBoundingClientRect();
+    };
+    const clientToNormalized = (clientX, clientY) => {
+      const rect = imageClientRect();
+      if (!rect) return null;
+      const x = (clientX - rect.left) / rect.width;
+      const y = (clientY - rect.top) / rect.height;
+      return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+    };
+    const normalizedToClient = (nx, ny) => {
+      const rect = imageClientRect();
+      if (!rect) return null;
+      return [rect.left + nx * rect.width, rect.top + ny * rect.height];
+    };
+
     const hitTestHandle = (clientX, clientY) => {
-      // returns {type: 'handle'|'vertex'|'inside'|'none', annId, index}
       const rect = imageClientRect();
       if (!rect) return { type: "none" };
       const cRect = container.getBoundingClientRect();
       const localX = clientX - cRect.left;
       const localY = clientY - cRect.top;
 
-      // loop annotations top-to-bottom (reverse) to hit topmost first
       for (let k = annotations.length - 1; k >= 0; k--) {
         const a = annotations[k];
         if (a.visible === false) continue;
@@ -652,13 +841,11 @@ export default function Annotate() {
           const [cx2, cy2] = normalizedToClient(x2, y2);
           const left = Math.min(cx1, cx2), top = Math.min(cy1, cy2);
           const right = Math.max(cx1, cx2), bottom = Math.max(cy1, cy2);
-          // compute container-local corners
           const cLeft = left - cRect.left;
           const cTop = top - cRect.top;
           const cRight = right - cRect.left;
           const cBottom = bottom - cRect.top;
-          // handle radius in local coords (hover radius)
-          const handleR = 12; // increased to make hover easier
+          const handleR = 12;
           const corners = [
             [cLeft, cTop],
             [cRight, cTop],
@@ -670,12 +857,10 @@ export default function Annotate() {
             const dy = localY - corners[i][1];
             if (dx * dx + dy * dy <= handleR * handleR) return { type: "corner", annId: a.id, index: i };
           }
-          // inside bbox?
           if (localX >= cLeft && localX <= cRight && localY >= cTop && localY <= cBottom) {
             return { type: "inside", annId: a.id };
           }
         } else if (a.type === "poly") {
-          // vertex hit
           for (let i = 0; i < a.points.length; i += 2) {
             const [vx, vy] = normalizedToClient(a.points[i], a.points[i + 1]);
             const lx = vx - container.getBoundingClientRect().left;
@@ -684,10 +869,8 @@ export default function Annotate() {
             const dy = localY - ly;
             if (dx * dx + dy * dy <= 12 * 12) return { type: "vertex", annId: a.id, index: i / 2 };
           }
-          // point-in-polygon test for inside (ray-casting)
           const rect = imageClientRect();
           if (!rect) continue;
-          // map local to normalized
           const nx = (localX - (rect.left - container.getBoundingClientRect().left)) / rect.width;
           const ny = (localY - (rect.top - container.getBoundingClientRect().top)) / rect.height;
           if (pointInPoly(nx, ny, a.points)) return { type: "inside", annId: a.id };
@@ -697,7 +880,6 @@ export default function Annotate() {
     };
 
     const pointInPoly = (x, y, pts) => {
-      // pts: [x,y,x,y...], x,y normalized
       let inside = false;
       for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
         const xi = pts[i], yi = pts[i + 1];
@@ -708,7 +890,6 @@ export default function Annotate() {
       return inside;
     };
 
-    // helper: set hover based on pointer
     const updateHover = (clientX, clientY) => {
       const hit = hitTestHandle(clientX, clientY);
       if (hit.type === "corner" || hit.type === "vertex") {
@@ -719,7 +900,6 @@ export default function Annotate() {
       }
     };
 
-    // PAN helpers
     const startPan = (e) => {
       panStartRef.current = {
         clientX: e.clientX,
@@ -727,8 +907,6 @@ export default function Annotate() {
         startX: panRef.current.x,
         startY: panRef.current.y,
       };
-      // set container cursor to grabbing visually (but we keep the cursor hidden per request; if you want visible, set '' or 'grabbing')
-      // container.style.cursor = 'grabbing';
     };
     const doPan = (e) => {
       if (!panStartRef.current) return;
@@ -736,7 +914,6 @@ export default function Annotate() {
       const dy = e.clientY - panStartRef.current.clientY;
       panRef.current.x = panStartRef.current.startX + dx;
       panRef.current.y = panStartRef.current.startY + dy;
-      // apply transform to image
       const img = imageRef.current;
       if (img) {
         img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`;
@@ -746,16 +923,12 @@ export default function Annotate() {
     };
     const endPan = () => {
       panStartRef.current = null;
-      // container.style.cursor = 'none'; // keep hidden
     };
 
-    // DRAW/EDIT/INTERACTION handlers
     const onPointerDown = (e) => {
-      // only left button for drawing/editing; but allow middle/left for pan if needed
       if (e.button && e.button !== 0) return;
       stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
 
-      // If hand mode (toggle) OR space pressed -> start panning
       if (handMode || spaceDownRef.current) {
         startPan(e);
         return;
@@ -763,16 +936,12 @@ export default function Annotate() {
 
       const imgRect = imageClientRect();
       if (!imgRect) return;
-
-      // ignore if clicked outside image
       if (e.clientX < imgRect.left || e.clientX > imgRect.right || e.clientY < imgRect.top || e.clientY > imgRect.bottom) return;
 
-      // update hover before hit test (ensures we detect vertex/corner)
       updateHover(e.clientX, e.clientY);
       const hit = hitTestHandle(e.clientX, e.clientY);
 
       if (hit.type === "corner" || hit.type === "vertex" || hit.type === "inside") {
-        // start editing selected annotation
         const ann = annotations.find((a) => a.id === hit.annId);
         if (!ann) return;
         setSelectedAnnId(ann.id);
@@ -780,26 +949,20 @@ export default function Annotate() {
         stateRef.current.edit.annId = ann.id;
         if (hit.type === "corner") {
           stateRef.current.edit.type = "corner";
-          stateRef.current.edit.index = hit.index; // 0..3
+          stateRef.current.edit.index = hit.index;
         } else if (hit.type === "vertex") {
           stateRef.current.edit.type = "vertex";
-          stateRef.current.edit.index = hit.index; // vertex index
+          stateRef.current.edit.index = hit.index;
         } else if (hit.type === "inside" && ann.type === "bbox") {
-          // Enable moving bbox by dragging inside
           stateRef.current.edit.type = "move";
           stateRef.current.edit.index = null;
-          // store offset between mouse client and annotation center for move
           const [x1, y1, x2, y2] = ann.points;
           const cx = (x1 + x2) / 2;
           const cy = (y1 + y2) / 2;
           const [centx, centy] = normalizedToClient(cx, cy);
           stateRef.current.edit.offset = [e.clientX - centx, e.clientY - centy];
-        } else {
-          // ...existing code for poly inside...
         }
-        // start capturing pointermove/up (editing will be performed in pointermove handler)
       } else {
-        // start drawing new shape
         const norm = clientToNormalized(e.clientX, e.clientY);
         if (!norm) return;
         stateRef.current.mode = "drawing";
@@ -815,7 +978,6 @@ export default function Annotate() {
             stateRef.current.draw.currentPoly = [norm[0], norm[1]];
             stateRef.current.draw.current = norm;
           } else {
-            // if already drawing poly, add vertex
             stateRef.current.draw.currentPoly.push(norm[0], norm[1]);
           }
         }
@@ -824,11 +986,8 @@ export default function Annotate() {
 
     const onPointerMove = (e) => {
       stateRef.current.mouse = { cx: e.clientX, cy: e.clientY };
-
-      // Update hover always (so handle becomes ring)
       updateHover(e.clientX, e.clientY);
 
-      // If panning
       if (panStartRef.current) {
         doPan(e);
         return;
@@ -846,20 +1005,15 @@ export default function Annotate() {
         const annIdx = annotations.findIndex((a) => a.id === edit.annId);
         if (annIdx === -1) return;
         const ann = annotations[annIdx];
-        // mouse normalized
         const norm = clientToNormalized(e.clientX, e.clientY);
         if (!norm) return;
         if (edit.type === "move") {
-          // compute delta normalized and move whole shape
           const [offsetX, offsetY] = edit.offset || [0, 0];
-          // compute new center in client coords:
           let newCenterClientX = e.clientX - offsetX;
           let newCenterClientY = e.clientY - offsetY;
-          // convert to normalized center
           const rect = imageClientRect();
           const newCenterNx = (newCenterClientX - rect.left) / rect.width;
           const newCenterNy = (newCenterClientY - rect.top) / rect.height;
-          // compute current center normalized and delta
           if (ann.type === "bbox") {
             const [x1, y1, x2, y2] = ann.points;
             const cx = (x1 + x2) / 2;
@@ -870,7 +1024,6 @@ export default function Annotate() {
             setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
           } else if (ann.type === "poly") {
             const pts = ann.points.slice();
-            // compute centroid
             let cx = 0, cy = 0;
             for (let i = 0; i < pts.length; i += 2) {
               cx += pts[i];
@@ -884,7 +1037,6 @@ export default function Annotate() {
             setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
           }
         } else if (edit.type === "corner" && ann.type === "bbox") {
-          // corner indices 0..3 map to (x1,y1),(x2,y1),(x2,y2),(x1,y2)
           const [nx, ny] = norm;
           let [x1, y1, x2, y2] = ann.points;
           if (edit.index === 0) {
@@ -896,7 +1048,6 @@ export default function Annotate() {
           } else if (edit.index === 3) {
             x1 = nx; y2 = ny;
           }
-          // normalize ordering
           const newPts = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)].map((v) => Math.min(1, Math.max(0, v)));
           setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
         } else if (edit.type === "vertex" && ann.type === "poly") {
@@ -909,24 +1060,12 @@ export default function Annotate() {
       }
     };
 
-    const computePolyCentroidClient = (pts, rect) => {
-      if (!rect) return [0,0];
-      let cx = 0, cy = 0;
-      for (let i = 0; i < pts.length; i += 2) {
-        cx += pts[i]; cy += pts[i+1];
-      }
-      cx /= pts.length/2; cy /= pts.length/2;
-      return normalizedToClient(cx, cy);
-    };
-
     const onPointerUp = (e) => {
-      // finalize panning if active
       if (panStartRef.current) {
         endPan();
         return;
       }
 
-      // finalize drawing or editing
       if (stateRef.current.mode === "drawing") {
         const d = stateRef.current.draw;
         if (d.inProgress) {
@@ -935,7 +1074,6 @@ export default function Annotate() {
               const [x1, y1] = d.start;
               const [x2, y2] = d.current;
               const bbox = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)];
-              // ignore too small
               if (Math.abs(bbox[2]-bbox[0]) > 0.002 && Math.abs(bbox[3]-bbox[1]) > 0.002) {
                 const ann = {
                   id: uid(),
@@ -948,30 +1086,25 @@ export default function Annotate() {
                 setAnnotations((p) => [...p, ann]);
               }
             }
-          } else if (d.mode === "poly") {
-            // when finishing poly by double-click or enter/context, we handle elsewhere; on pointerup we don't auto-close
           }
         }
       }
-      // reset draw inprogress for bbox
+
       if (stateRef.current.draw.inProgress && stateRef.current.draw.mode === "bbox") {
         stateRef.current.draw.inProgress = false;
         stateRef.current.draw.start = null;
         stateRef.current.draw.current = null;
       }
       if (stateRef.current.mode === "editing") {
-        // clear editing
         stateRef.current.edit = { annId: null, type: null, index: null, offset: null };
         stateRef.current.mode = null;
       } else if (stateRef.current.mode === "drawing") {
-        // remain in drawing mode for poly; for bbox we cleared above
         if (stateRef.current.draw.mode === "bbox") {
           stateRef.current.mode = null;
         }
       }
     };
 
-    // right-click finishes polygon
     const onContext = (e) => {
       const d = stateRef.current.draw;
       if (d.inProgress && d.mode === "poly") {
@@ -995,38 +1128,24 @@ export default function Annotate() {
       }
     };
 
-    // Ctrl/Cmd + scroll to zoom centered at cursor (NEW)
     const onWheel = (e) => {
-      // If user holds ctrl or meta, perform zoom centered at mouse pointer
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const delta = -e.deltaY;
         const zoomFactor = delta > 0 ? 1.08 : 0.92;
         const newZoom = Math.min(4, Math.max(0.25, zoom * zoomFactor));
-        // adjust pan so zoom centers on cursor
         const rect = imageClientRect();
         if (!rect) {
           setZoom(newZoom);
           return;
         }
-        // cursor point relative to image
         const cursorX = e.clientX;
         const cursorY = e.clientY;
-        // compute cursor position normalized within image BEFORE zoom
         const nx = (cursorX - rect.left) / rect.width;
         const ny = (cursorY - rect.top) / rect.height;
-        // compute image center in client coords and current pan
         const img = imageRef.current;
         const prevScale = zoom;
         const nextScale = newZoom;
-        // We'll update pan so that the point under the cursor stays under the cursor
-        // client point = imgLeft + nx * imgWidth * prevScale + pan.x
-        // After zoom: imgLeft' + nx * imgWidth * nextScale + pan'.x should equal cursorX
-        // Using getBoundingClientRect to compute current image left/top should already reflect pan+scale,
-        // so a simpler approach is compute the difference and adjust pan by (cursor - newRectCursor)
-        // Temporarily set scale to compute new bounding rect: apply transform, read rect, then compute pan delta.
-        // To avoid flicker we compute mathematically: deltaPan = (1 - nextScale/prevScale) * (cursor - imageCenter) 
-        // approximate using image center:
         const imgCenterX = rect.left + rect.width / 2;
         const imgCenterY = rect.top + rect.height / 2;
         const dx = cursorX - imgCenterX;
@@ -1034,7 +1153,6 @@ export default function Annotate() {
         const ratio = (nextScale / prevScale) - 1;
         panRef.current.x -= dx * ratio;
         panRef.current.y -= dy * ratio;
-        // apply new zoom and pan
         setZoom(newZoom);
         if (img) {
           img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${newZoom})`;
@@ -1044,22 +1162,18 @@ export default function Annotate() {
     };
 
     const onKey = (ev) => {
-      // space toggles pan while held
       if (ev.code === "Space") {
         if (ev.type === "keydown") {
           spaceDownRef.current = true;
         }
       }
 
-      // Tool shortcuts
       if (ev.key === "b" || ev.key === "B") setTool("bbox");
       if (ev.key === "p" || ev.key === "P") setTool("poly");
 
-      // In onKey handler, add guard for class name input
       const activeElement = document.activeElement;
       const isClassInputFocused = classInputRef.current && classInputRef.current === activeElement;
 
-      // Navigation shortcuts (A/D and Arrow keys)
       if (!isClassInputFocused) {
         if (ev.key === "a" || ev.key === "A" || ev.key === "ArrowLeft") {
           handlePrevImage();
@@ -1069,17 +1183,14 @@ export default function Annotate() {
         }
       }
 
-      // Undo/Redo
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "z") {
         ev.preventDefault();
         if (ev.shiftKey) {
-          // Redo
           if (historyIndex < history.length - 1) {
             setHistoryIndex(i => i + 1);
             setAnnotations(history[historyIndex + 1]);
           }
         } else {
-          // Undo
           if (historyIndex > 0) {
             setHistoryIndex(i => i - 1);
             setAnnotations(history[historyIndex - 1]);
@@ -1087,7 +1198,6 @@ export default function Annotate() {
         }
       }
 
-      // ESC to cancel drawing
       if (ev.key === "Escape") {
         const d = stateRef.current.draw;
         if (d.inProgress) {
@@ -1099,10 +1209,8 @@ export default function Annotate() {
         }
       }
 
-      // Save shortcut
       if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
         ev.preventDefault();
-        // manual save
         (async () => {
           const img = images[currentIdx];
           if (!img) return;
@@ -1118,7 +1226,22 @@ export default function Annotate() {
               .first();
             if (existing) await db.annotations.update(existing.id, payload);
             else await db.annotations.add(payload);
-            alert("Saved!");
+
+            // write annotation file
+            const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+            if (dsFolder) {
+              const filePayload = {
+                imageId: img.id,
+                imageName: img.name,
+                datasetId: dsId,
+                annotations,
+                updatedAt: new Date().toISOString(),
+                versionId: null,
+              };
+              await writeAnnotationFile(dsFolder, img.id, filePayload, null);
+            }
+
+            alert("Saved");
           } catch (err) {
             console.error("Save failed:", err);
             alert("Save failed. See console.");
@@ -1126,7 +1249,6 @@ export default function Annotate() {
         })();
       }
 
-      // Fix Delete key to delete annotation
       if ((ev.key === "Delete" || ev.key === "Backspace") && ev.type === "keydown") {
         if (selectedAnnId) deleteAnnotation(selectedAnnId);
       }
@@ -1136,7 +1258,6 @@ export default function Annotate() {
       if (ev.code === "Space") spaceDownRef.current = false;
     };
 
-    // Attach listeners
     container.addEventListener("pointerdown", onPointerDown);
     container.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -1145,7 +1266,6 @@ export default function Annotate() {
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
 
-    // Ensure image transform matches state initially
     const img = imageRef.current;
     if (img) {
       img.style.transform = `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`;
@@ -1163,7 +1283,9 @@ export default function Annotate() {
     };
   }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId, handMode, zoom]);
 
-  // --------------------- Classes & annotation list helpers ---------------------
+  /* -----------------------------
+     Classes & annotation list helpers
+  ----------------------------- */
   const addClass = async () => {
     const name = newClassName.trim();
     if (!name) return;
@@ -1187,7 +1309,6 @@ export default function Annotate() {
     updateAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, visible: !a.visible } : a)));
   };
 
-  // Add to history
   const addToHistory = (newAnnotations) => {
     const newHistory = history.slice(0, historyIndex + 1);
     newHistory.push([...newAnnotations]);
@@ -1195,7 +1316,6 @@ export default function Annotate() {
     setHistoryIndex(newHistory.length - 1);
   };
 
-  // Update setAnnotations to track history
   const updateAnnotations = (updater) => {
     setAnnotations((prev) => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -1204,21 +1324,82 @@ export default function Annotate() {
     });
   };
 
-  // Handle next image
   const handleNextImage = () => {
     if (currentIdx < images.length - 1) {
       setCurrentIdx((i) => Math.min(images.length - 1, i + 1));
     }
   };
 
-  // Handle previous image
   const handlePrevImage = () => {
     if (currentIdx > 0) {
       setCurrentIdx((i) => Math.max(0, i - 1));
     }
   };
 
-  // Shortcuts Modal
+  /* -----------------------------
+     Delete IMAGE flow (AppModal confirm, DB + FS cleanup)
+  ----------------------------- */
+  const confirmDeleteImage = (img) => {
+    if (!img) return;
+    openModal({
+      type: "confirm",
+      title: "Delete Image?",
+      message:
+        `This will permanently delete the image "${img.name}" from disk, remove its annotations and remove it from any jobs.\n\nThis cannot be undone. Continue?`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        try {
+          setLoading(true);
+
+          // 1) Delete file from disk (images/raw/<name>)
+          const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+          if (dsFolder) {
+            await deleteImageFile(dsFolder, img.name);
+            await deleteAnnotationFile(dsFolder, img.id);
+            // update job files and DB job.imageIds
+            await updateJobFileAfterImageDeletion(dsFolder, img.id);
+            // update dataset.json job counts
+            await updateDatasetJsonJobCounts(dsFolder);
+          }
+
+          // 2) Remove annotations from DB
+          try {
+            await db.annotations.where("datasetId").equals(dsId).and(a => a.imageName === img.name).delete();
+          } catch {}
+
+          // 3) Remove image row from DB
+          await db.images.delete(img.id);
+
+          // 4) Remove image id from any db.jobs.imageIds arrays
+          try {
+            const jobsContaining = await db.jobs.filter(j => (j.imageIds || []).includes(img.id)).toArray();
+            for (const jb of jobsContaining) {
+              const newIds = (jb.imageIds || []).filter(x => x !== img.id);
+              await db.jobs.update(jb.id, { imageIds: newIds });
+            }
+          } catch {}
+
+          // 5) Update UI state
+          setImages((imgs) => imgs.filter((i, idx) => i.id !== img.id));
+          setCurrentIdx((i) => Math.max(0, Math.min(i, images.length - 2)));
+
+          setLoading(false);
+          return true;
+        } catch (err) {
+          console.error("Delete image failed:", err);
+          openModal({ type: "error", title: "Delete Failed", message: "Failed to delete image. See console." });
+          setLoading(false);
+          return false;
+        }
+      },
+      autoClose: true,
+    });
+  };
+
+  /* -----------------------------
+     Shortcuts modal component
+  ----------------------------- */
   const ShortcutsModal = () => (
     <Modal show={showShortcuts} onHide={() => setShowShortcuts(false)}>
       <Modal.Header closeButton>
@@ -1244,7 +1425,9 @@ export default function Annotate() {
     </Modal>
   );
 
-  // --------------------- UI helpers ---------------------
+  /* -----------------------------
+     UI helpers & render
+  ----------------------------- */
   const currentImage = images[currentIdx];
 
   if (loading)
@@ -1272,7 +1455,9 @@ export default function Annotate() {
         color: themeColors.text,
       }}
     >
-      {/* Top toolbar (kept as you had it) */}
+      <AppModal {...modal} show={modal.show} onClose={closeModal} />
+
+      {/* Top toolbar */}
       <div
         style={{
           display: "flex",
@@ -1310,7 +1495,6 @@ export default function Annotate() {
           </Button>
 
           <Button variant="outline-secondary" size="sm" onClick={() => {
-            // zoom out and keep image centered
             setZoom((z) => {
               const nz = Math.max(0.25, z - 0.25);
               const img = imageRef.current;
@@ -1335,18 +1519,15 @@ export default function Annotate() {
             {crosshair ? <Eye size={14} /> : <EyeOff size={14} />}
           </Button>
 
-          {/* Hand mode toggle (NEW) */}
           <Button
             variant={handMode ? "primary" : "outline-secondary"}
             size="sm"
             onClick={() => setHandMode((h) => !h)}
             title="Toggle hand tool (or hold Space)"
           >
-            {/* Use text "Hand" to avoid adding extra icon dependency */}
             Hand
           </Button>
 
-          {/* Add Shortcuts Help Button */}
           <Button
             variant="outline-secondary"
             size="sm"
@@ -1360,21 +1541,41 @@ export default function Annotate() {
             variant="success"
             size="sm"
             onClick={async () => {
-              // manual save
               const img = images[currentIdx];
               if (!img) return alert("No image");
               try {
                 const payload = {
                   datasetId: dsId,
+                  imageId: img.id,
                   imageName: img.name,
                   data: annotations,
                   updatedAt: new Date().toISOString(),
                 };
                 const existing = await db.annotations
-                  .where({ datasetId: dsId, imageName: img.name })
+                  .where("datasetId")
+                  .equals(dsId)
+                  .and((a) => a.imageName === img.name)
                   .first();
                 if (existing) await db.annotations.update(existing.id, payload);
-                else await db.annotations.add(payload);
+                else {
+                  payload.id = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+                  await db.annotations.add(payload);
+                }
+
+                // write annotation file
+                const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+                if (dsFolder) {
+                  const filePayload = {
+                    imageId: img.id,
+                    imageName: img.name,
+                    datasetId: dsId,
+                    annotations,
+                    updatedAt: new Date().toISOString(),
+                    versionId: null,
+                  };
+                  await writeAnnotationFile(dsFolder, img.id, filePayload, null);
+                }
+
                 alert("Saved");
               } catch (err) {
                 console.error("Save failed:", err);
@@ -1385,33 +1586,10 @@ export default function Annotate() {
             <Save size={14} /> Save
           </Button>
 
-          {/* Delete Image Button */}
           <Button
             variant="danger"
             size="sm"
-            onClick={async () => {
-              const img = images[currentIdx];
-              if (!img) return;
-              if (!window.confirm("Delete this image? This will remove it from all jobs and the database.")) return;
-              // Remove image from db
-              await db.images.delete(img.id);
-              // Remove image from all jobs
-              const jobs = await db.jobs.where("imageIds").equals(img.id).toArray();
-              for (const job of jobs) {
-                const newImageIds = (job.imageIds || []).filter((id) => id !== img.id);
-                await db.jobs.update(job.id, { imageIds: newImageIds });
-              }
-              // Remove annotations for this image
-              await db.annotations.where("imageName").equals(img.name).delete();
-              // Revoke object URL if present
-              if (img.url && createdUrlsRef.current.has(img.url)) {
-                try { URL.revokeObjectURL(img.url); } catch {}
-                createdUrlsRef.current.delete(img.url);
-              }
-              // Remove from images state
-              setImages((imgs) => imgs.filter((im, idx) => idx !== currentIdx));
-              setCurrentIdx((idx) => Math.max(0, idx - 1));
-            }}
+            onClick={() => confirmDeleteImage(currentImage)}
             title="Delete current image"
           >
             <Trash2 size={14} /> Delete Image
@@ -1421,80 +1599,75 @@ export default function Annotate() {
 
       {/* Main content */}
       <div style={{ display: "flex", flex: 1, height: "calc(100% - 60px)" }}>
-        <div className="image-annotation-left-panel" style={{ position: "relative",height: "100%" }}>
-        <div style = {{position: "absolute",
-                       top: 10, 
-                       left: leftPanelOpen ? 310 : 10, 
-                       zIndex: 1, 
-                       display: "flex", 
-                       alignItems: "center", 
-                       gap: 4, 
-                       padding: "4px 8px",
-                      background: themeColors.toolbarBg, 
-                      borderRadius: 6, 
-                      border: `1px solid ${themeColors.border}`}}
-              onClick={() => handleLeftPanelToggle(!leftPanelOpen)}>
-          images <ImageIcon></ImageIcon>
-        </div>
-        {/* Left thumbnails */}
-        {leftPanelOpen && (
-          <div
-            style={{
-              width: 300,
-              height: "100%",
-              borderRight: `1px solid ${themeColors.border}`,
-              background: themeColors.sidebarBg,
-              padding: 8,
-              overflowY: "auto",
-              transition: "width 0.2s",
-              position: "relative",
-            }}
-          >
-            <div className="d-flex justify-content-between align-items-center mb-2">
-              <b>Images</b>
-              <Badge bg="secondary">{images.length}</Badge>
-            </div>
+        <div className="image-annotation-left-panel" style={{ position: "relative", height: "100%" }}>
+          <div style={{
+            position: "absolute",
+            top: 10,
+            left: leftPanelOpen ? 310 : 10,
+            zIndex: 1,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "4px 8px",
+            background: themeColors.toolbarBg,
+            borderRadius: 6,
+            border: `1px solid ${themeColors.border}`
+          }}
+            onClick={() => handleLeftPanelToggle(!leftPanelOpen)}>
+            images <ImageIcon />
+          </div>
+
+          {leftPanelOpen && (
             <div
               style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
+                width: 300,
+                height: "100%",
+                borderRight: `1px solid ${themeColors.border}`,
+                background: themeColors.sidebarBg,
+                padding: 8,
+                overflowY: "auto",
+                transition: "width 0.2s",
+                position: "relative",
               }}
             >
-              {images.map((img, i) => (
-                <div
-                  key={img.id}
-                  onClick={() => setCurrentIdx(i)}
-                  style={{
-                    cursor: "pointer",
-                    border:
-                      i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
-                    borderRadius: 6,
-                    overflow: "hidden",
-                  }}
-                >
-                  {img.url ? (
-                    <img
-                      src={img.url}
-                      alt={img.name}
-                      style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
-                      onError={(e) => {
-                        e.currentTarget.src = "";
-                        console.warn("Thumbnail failed:", img.url);
-                      }}
-                    />
-                  ) : (
-                    <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: themeColors.subtleText }}>
-                      <ImageIcon />
-                    </div>
-                  )}
-                </div>
-              ))}
+              <div className="d-flex justify-content-between align-items-center mb-2">
+                <b>Images</b>
+                <Badge bg="secondary">{images.length}</Badge>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {images.map((img, i) => (
+                  <div
+                    key={img.id}
+                    onClick={() => setCurrentIdx(i)}
+                    style={{
+                      cursor: "pointer",
+                      border: i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
+                      borderRadius: 6,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {img.url ? (
+                      <img
+                        src={img.url}
+                        alt={img.name}
+                        style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
+                        onError={(e) => {
+                          e.currentTarget.src = "";
+                          console.warn("Thumbnail failed:", img.url);
+                        }}
+                      />
+                    ) : (
+                      <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: themeColors.subtleText }}>
+                        <ImageIcon />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-     
+          )}
         </div>
+
         {/* Center: image + canvas overlay */}
         <div
           style={{
@@ -1508,90 +1681,72 @@ export default function Annotate() {
           }}
           ref={containerRef}
         >
-       
           {currentImage?.url ? (
             <>
-              <div
-                className="annotation-stage"
-                style={{
-                  transition: "transform 0.05s linear",
-                  // hide default cursor over stage (we render crosshair/dot ourselves)
-                  // Note: buttons and sidebar will still use system cursor
-                }}
-              >
-              <img
-                ref={imageRef}
-                src={currentImage.url}
-                alt={currentImage.name}
-                style={{
-                  maxWidth: `100%`,
-                  maxHeight: `85vh`,
-                  objectFit: "contain",
-                  display: "block",
-                  // transform will be set dynamically (pan + zoom)
-                  transform: `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`,
-                  transformOrigin: "center center",
-                  userSelect: "none",
-                }}
-                onError={(e) => {
-                  e.currentTarget.src = "";
-                  console.warn("Full image load failed:", currentImage.url);
-                }}
-                draggable={false}
-              />
-              <canvas
-                ref={canvasRef}
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  height: "100%",
-                  pointerEvents: "none", // pointer events handled on container
-                }}
-              />
-              {/* bottom bar with name and nav (full width) */}
-              <div
-                style={{
-                  position: "absolute",
-                  bottom: 10,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  width: "60%",
-                  maxWidth: 900,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  background: "rgba(0,0,0,0.6)",
-                  color: "white",
-                  padding: "6px 8px",
-                  borderRadius: 6,
-                }}
-              >
-                <div style={{ display: "flex", gap: 8 }}>
-                  <Button
-                    size="sm"
-                    variant="light"
-                    onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
-                  >
-                    <ChevronLeft size={16} />
-                  </Button>
-                </div>
+              <div className="annotation-stage" style={{ transition: "transform 0.05s linear" }}>
+                <img
+                  ref={imageRef}
+                  src={currentImage.url}
+                  alt={currentImage.name}
+                  style={{
+                    maxWidth: `100%`,
+                    maxHeight: `85vh`,
+                    objectFit: "contain",
+                    display: "block",
+                    transform: `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`,
+                    transformOrigin: "center center",
+                    userSelect: "none",
+                  }}
+                  onError={(e) => {
+                    e.currentTarget.src = "";
+                    console.warn("Full image load failed:", currentImage.url);
+                  }}
+                  draggable={false}
+                />
+                <canvas
+                  ref={canvasRef}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    height: "100%",
+                    pointerEvents: "none",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    bottom: 10,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    width: "60%",
+                    maxWidth: 900,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    background: "rgba(0,0,0,0.6)",
+                    color: "white",
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Button size="sm" variant="light" onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}>
+                      <ChevronLeft size={16} />
+                    </Button>
+                  </div>
 
-                <div style={{ textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {currentImage.name}
-                </div>
+                  <div style={{ textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {currentImage.name}
+                  </div>
 
-                <div style={{ display: "flex", gap: 8 }}>
-                  <Button
-                    size="sm"
-                    variant="light"
-                    onClick={() => setCurrentIdx((i) => Math.min(images.length - 1, i + 1))}
-                  >
-                    <ChevronRight size={16} />
-                  </Button>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Button size="sm" variant="light" onClick={() => setCurrentIdx((i) => Math.min(images.length - 1, i + 1))}>
+                      <ChevronRight size={16} />
+                    </Button>
+                  </div>
                 </div>
-              </div>
               </div>
             </>
           ) : (
@@ -1603,153 +1758,151 @@ export default function Annotate() {
         </div>
 
         <div className="image-annotation-right-panel" style={{ position: "relative" }}>
-        <div style = {{position: "absolute",
-                       top: 10, 
-                       right: rightPanelOpen ? 310 : 10, 
-                       zIndex: 1, 
-                       display: "flex", 
-                       alignItems: "center", 
-                       gap: 4, 
-                       padding: "4px 8px",
-                      background: themeColors.toolbarBg, 
-                      borderRadius: 6, 
-                      border: `1px solid ${themeColors.border}`}}
+          <div style={{
+            position: "absolute",
+            top: 10,
+            right: rightPanelOpen ? 310 : 10,
+            zIndex: 1,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "4px 8px",
+            background: themeColors.toolbarBg,
+            borderRadius: 6,
+            border: `1px solid ${themeColors.border}`
+          }}
             onClick={() => handleRightPanelToggle(!rightPanelOpen)}>
-          labels <TagIcon></TagIcon>
-        </div>
-        {/* Right: annotations & classes */}
-        {rightPanelOpen && (
-          <div
-            style={{
-              width: 300,
-              height: "100%",
-              borderRight: `1px solid ${themeColors.border}`,
-              background: themeColors.sidebarBg,
-              padding: 8,
-              overflowY: "auto",
-              transition: "width 0.2s",
-              position: "relative",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <h6 style={{ margin: 0 }}>Annotations</h6>
-              <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
-            </div>
+            labels <TagIcon />
+          </div>
 
-            <div style={{ marginBottom: 8 ,width: '100%'}}>
-              {annotations.length === 0 ? (
-                <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
-              ) : (
-                <ListGroup>
-                  {annotations.map((a) => (
-                    <ListGroup.Item
-                      key={a.id}
-                      active={a.id === selectedAnnId}
-                      onClick={() => setSelectedAnnId(a.id)}
-                      style={{ display: "flex",
-                                gap: 8,
-                                alignItems: "center",
-                                justifyContent: "space-between",
-                                color: themeColors.text,
-                                backgroundColor: themeColors.cardBg,
-                                border: `1px solid ${themeColors.border}`,}}
-                    >
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                        <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
-                        <div style={{ flex: 1 }}>
-                          <Form.Select
-                            size="sm"
-                            value={a.className}
-                            onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
-                          >
-                            {classes.map((c) => (
-                              <option key={c.id} value={c.name}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </Form.Select>
-                        </div>
-                      </div>
-
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
-                          {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
-                        </Button>
-                        <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
-                          <Trash2 size={14} />
-                        </Button>
-                      </div>
-                    </ListGroup.Item>
-                  ))}
-                </ListGroup>
-              )}
-            </div>
-
-            <hr />
-
-            <div style={{ marginBottom: 8 }}>
-              <h6 style={{ marginBottom: 8 }}>Classes</h6>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <InputGroup>
-                  <Form.Control
-                    ref={classInputRef}
-                    size="sm"
-                    placeholder="New class name"
-                    value={newClassName}
-                    onChange={(e) => setNewClassName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
-                  />
-                  <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
-                </InputGroup>
+          {rightPanelOpen && (
+            <div
+              style={{
+                width: 300,
+                height: "100%",
+                borderRight: `1px solid ${themeColors.border}`,
+                background: themeColors.sidebarBg,
+                padding: 8,
+                overflowY: "auto",
+                transition: "width 0.2s",
+                position: "relative",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <h6 style={{ margin: 0 }}>Annotations</h6>
+                <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {classes.map((c) => (
-                  <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
-                      <div>{c.name}</div>
-                    </div>
-                    <div>
-                      <Button
-                        size="sm"
-                        variant="outline-secondary"
-                        onClick={() => {
-                          if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
+              <div style={{ marginBottom: 8, width: '100%' }}>
+                {annotations.length === 0 ? (
+                  <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
+                ) : (
+                  <ListGroup>
+                    {annotations.map((a) => (
+                      <ListGroup.Item
+                        key={a.id}
+                        active={a.id === selectedAnnId}
+                        onClick={() => setSelectedAnnId(a.id)}
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          color: themeColors.text,
+                          backgroundColor: themeColors.cardBg,
+                          border: `1px solid ${themeColors.border}`,
                         }}
                       >
-                        Assign
-                      </Button>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                          <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
+                          <div style={{ flex: 1 }}>
+                            <Form.Select
+                              size="sm"
+                              value={a.className}
+                              onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
+                            >
+                              {classes.map((c) => (
+                                <option key={c.id} value={c.name}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </Form.Select>
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
+                            {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                          </Button>
+                          <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
+                            <Trash2 size={14} />
+                          </Button>
+                        </div>
+                      </ListGroup.Item>
+                    ))}
+                  </ListGroup>
+                )}
+              </div>
+
+              <hr />
+
+              <div style={{ marginBottom: 8 }}>
+                <h6 style={{ marginBottom: 8 }}>Classes</h6>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <InputGroup>
+                    <Form.Control
+                      ref={classInputRef}
+                      size="sm"
+                      placeholder="New class name"
+                      value={newClassName}
+                      onChange={(e) => setNewClassName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
+                    />
+                    <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
+                  </InputGroup>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {classes.map((c) => (
+                    <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
+                        <div>{c.name}</div>
+                      </div>
+                      <div>
+                        <Button
+                          size="sm"
+                          variant="outline-secondary"
+                          onClick={() => {
+                            if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
+                          }}
+                        >
+                          Assign
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              </div>
+
+              <hr />
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button variant="outline-secondary" onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}>
+                  <ChevronLeft size={14} /> Prev
+                </Button>
+                <Button variant="outline-secondary" onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}>
+                  Next <ChevronRight size={14} />
+                </Button>
+                <div style={{ marginLeft: "auto", color: themeColors.subtleText, alignSelf: "center" }}>
+                  {currentIdx + 1}/{images.length}
+                </div>
               </div>
             </div>
-
-            <hr />
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <Button
-                variant="outline-secondary"
-                onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}
-              >
-                <ChevronLeft size={14} /> Prev
-              </Button>
-              <Button
-                variant="outline-secondary"
-                onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}
-              >
-                Next <ChevronRight size={14} />
-              </Button>
-              <div style={{ marginLeft: "auto", color: themeColors.subtleText, alignSelf: "center" }}>
-                {currentIdx + 1}/{images.length}
-              </div>
-            </div>
-          </div>
-        )}
- 
+          )}
         </div>
       </div>
+
       <ShortcutsModal />
     </div>
   );
