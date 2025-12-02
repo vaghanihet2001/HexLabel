@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useRef } from "react";
 import { Card, Row, Col, Button, Form, Spinner, Dropdown, InputGroup, FormControl } from "react-bootstrap";
 import { useNavigate, useParams } from "react-router-dom";
+import { CheckSquare, Square } from "lucide-react";
 import { db } from "../../utils/db";
 import { useTheme } from "../../components/ThemeContext";
+import AppModal from "../../components/AppModal";
 
 export default function DatasetGalleryPage({ datasetId }) {
   const { projectId } = useParams();
@@ -16,6 +18,24 @@ export default function DatasetGalleryPage({ datasetId }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // Map<imageName, Set<className>> for synchronous filtering
+  const [imageLabelsMap, setImageLabelsMap] = useState(new Map());
+
+  // Modal state
+  const [modal, setModal] = useState({
+    show: false,
+    type: "info",
+    title: "",
+    message: "",
+    confirmText: "OK",
+    cancelText: "Cancel",
+    onConfirm: null,
+    autoClose: false,
+  });
+
+  const openModal = (data) => setModal({ ...modal, ...data, show: true });
+  const closeModal = () => setModal((prev) => ({ ...prev, show: false, onConfirm: null }));
+
   const createdUrlsRef = useRef(new Set());
 
   useEffect(() => {
@@ -24,7 +44,10 @@ export default function DatasetGalleryPage({ datasetId }) {
 
     (async () => {
       try {
-        const ds = await db.datasets.get(datasetId);
+        const [ds, proj] = await Promise.all([
+          db.datasets.get(datasetId),
+          db.projects.get(projectId),
+        ]);
         if (!ds) return;
 
         const jobs = await db.jobs.where({ datasetId, status: "completed" }).toArray();
@@ -36,14 +59,19 @@ export default function DatasetGalleryPage({ datasetId }) {
         for (const img of imgs) {
           let url = null;
           try {
-            if (ds.folderHandle) {
+            // Try to get dataset folder handle (from dataset or project)
+            const dsFolder = ds.folderHandle || (proj?.folderHandle ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null) : null);
+
+            if (dsFolder) {
               try {
-                const rawDir = await ds.folderHandle.getDirectoryHandle("raw_images", { create: false });
+                // images are stored under images/raw/<name>
+                const imagesDir = await dsFolder.getDirectoryHandle("images");
+                const rawDir = await imagesDir.getDirectoryHandle("raw");
                 const fh = await rawDir.getFileHandle(img.name);
                 const file = await fh.getFile();
                 url = URL.createObjectURL(file);
                 createdUrlsRef.current.add(url);
-              } catch {}
+              } catch { }
             }
             if (!url && img.url) url = img.url;
           } catch (e) {
@@ -58,14 +86,25 @@ export default function DatasetGalleryPage({ datasetId }) {
         // derive classes from annotations
         const allAnn = await db.annotations.where("datasetId").equals(datasetId).toArray();
         const labels = new Set();
+        const map = new Map();
+
         for (const ann of allAnn) {
           const arr = ann?.data ?? [];
+          const imgLabels = new Set();
           for (const a of arr) {
-            if (a.className) labels.add(a.className);
+            if (a.className) {
+              labels.add(a.className);
+              imgLabels.add(a.className);
+            }
+          }
+          if (imgLabels.size > 0) {
+            // Use imageId as key for robustness
+            map.set(ann.imageId, imgLabels);
           }
         }
         labels.add(null); // include images with no annotations
         setClasses(Array.from(labels));
+        setImageLabelsMap(map);
       } catch (err) {
         console.error("Failed to load images/classes:", err);
       } finally {
@@ -79,6 +118,10 @@ export default function DatasetGalleryPage({ datasetId }) {
       mounted = false;
     };
   }, [datasetId, projectId]);
+
+  useEffect(() => {
+    setSelectedImages(new Set());
+  }, [searchQuery, selectedClasses]);
 
   const toggleClass = (cls) => {
     setSelectedClasses((prev) => {
@@ -98,18 +141,29 @@ export default function DatasetGalleryPage({ datasetId }) {
 
   const deleteSelectedImages = async () => {
     if (selectedImages.size === 0) return;
-    if (!confirm("Delete selected images?")) return;
 
-    setLoading(true);
-    try {
-      for (const id of selectedImages) await db.images.delete(id);
-      setImages((prev) => prev.filter((img) => !selectedImages.has(img.id)));
-      setSelectedImages(new Set());
-    } catch (err) {
-      console.error("Failed to delete images:", err);
-    } finally {
-      setLoading(false);
-    }
+    openModal({
+      type: "confirm",
+      title: "Delete Images?",
+      message: `Are you sure you want to delete ${selectedImages.size} selected images?`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      onConfirm: async () => {
+        setLoading(true);
+        try {
+          for (const id of selectedImages) await db.images.delete(id);
+          setImages((prev) => prev.filter((img) => !selectedImages.has(img.id)));
+          setSelectedImages(new Set());
+          return true;
+        } catch (err) {
+          console.error("Failed to delete images:", err);
+          return false;
+        } finally {
+          setLoading(false);
+        }
+      },
+      autoClose: true,
+    });
   };
 
   // Filter images by search and selected classes
@@ -118,12 +172,20 @@ export default function DatasetGalleryPage({ datasetId }) {
 
     if (selectedClasses.size === 0) return true;
 
-    const ann = db.annotations.where({ datasetId, imageName: img.name }).first().catch(() => null);
-    if (!ann && selectedClasses.has(null)) return true;
-    if (!ann) return false;
+    // Synchronous lookup using pre-computed map (keyed by imageId)
+    const imgLabels = imageLabelsMap.get(img.id);
 
-    const classNames = (ann.data ?? []).map((a) => a.className);
-    return Array.from(selectedClasses).some((cls) => cls === null || classNames.includes(cls));
+    // If image has no labels in map, it matches "Unlabeled" (null) filter
+    if (!imgLabels && selectedClasses.has(null)) return true;
+
+    // If image has labels, check if any match selected classes
+    if (imgLabels) {
+      for (const cls of imgLabels) {
+        if (selectedClasses.has(cls)) return true;
+      }
+    }
+
+    return false;
   });
 
   if (loading)
@@ -135,38 +197,67 @@ export default function DatasetGalleryPage({ datasetId }) {
 
   return (
     <div>
+      <AppModal {...modal} show={modal.show} onClose={closeModal} />
       {/* Toolbar */}
       <div >
         <div className="d-flex justify-content-start align-items-center mb-3 flex-wrap gap-2">
-        <InputGroup style={{ maxWidth: 250 }}>
-          <FormControl
-            placeholder="Search by image name..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+          <InputGroup style={{ maxWidth: 250 }}>
+            <FormControl
+              placeholder="Search by image name..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
             />
-        </InputGroup>
+          </InputGroup>
 
-        <Dropdown>
-          <Dropdown.Toggle size="sm" variant="outline-secondary">
-            Classes Filter
-          </Dropdown.Toggle>
-          <Dropdown.Menu style={{ maxHeight: 200, overflowY: "auto", padding: "0.5rem" }}>
-            {classes.map((cls, idx) => (
-              <Form.Check
-              key={idx}
-              type="checkbox"
-              id={`class-${idx}`}
-              label={cls ?? "Unlabeled"}
-              checked={selectedClasses.has(cls)}
-              onChange={() => toggleClass(cls)}
-              />
-            ))}
-          </Dropdown.Menu>
-        </Dropdown>
+          <Dropdown autoClose="outside">
+            <Dropdown.Toggle
+              size="sm"
+              variant="outline-secondary"
+              id="dropdown-basic"
+              style={{
+                background: themeColors.buttonBg,
+                color: themeColors.text,
+                borderColor: themeColors.border,
+              }}
+            >
+              Classes Filter
+            </Dropdown.Toggle>
+            <Dropdown.Menu
+              style={{
+                maxHeight: 200,
+                overflowY: "auto",
+                padding: "0.5rem",
+                backgroundColor: themeColors.cardBg,
+                color: themeColors.text,
+                border: `1px solid ${themeColors.border}`,
+              }}
+            >
+              {classes.map((cls, idx) => (
+                <div
+                  key={idx}
+                  className="dropdown-item-custom"
+                  style={{ padding: "4px 8px", cursor: "pointer" }}
+                  onClick={(e) => {
+                    e.stopPropagation(); // Prevent dropdown close
+                    toggleClass(cls);
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {selectedClasses.has(cls) ? (
+                      <CheckSquare size={16} color={themeColors.primary} />
+                    ) : (
+                      <Square size={16} color={themeColors.text} />
+                    )}
+                    <span>{cls ?? "Unlabeled"}</span>
+                  </div>
+                </div>
+              ))}
+            </Dropdown.Menu>
+          </Dropdown>
 
-        <Button size="sm" variant="outline-danger" onClick={deleteSelectedImages}>
-          Delete Selected
-        </Button>
+          <Button size="sm" variant="outline-danger" onClick={deleteSelectedImages}>
+            Delete Selected
+          </Button>
         </div>
         <div>
           <strong>{filteredImages.length} images</strong>
@@ -190,11 +281,13 @@ export default function DatasetGalleryPage({ datasetId }) {
               }}
             >
               <div style={{ position: "absolute", top: 5, left: 5, zIndex: 10 }}>
-                <Form.Check
-                  type="checkbox"
-                  checked={selectedImages.has(img.id)}
-                  onChange={() => toggleImageSelect(img.id)}
-                />
+                <div onClick={() => toggleImageSelect(img.id)}>
+                  {selectedImages.has(img.id) ? (
+                    <CheckSquare color={themeColors.primary} />
+                  ) : (
+                    <Square color={themeColors.text} />
+                  )}
+                </div>
               </div>
 
               <div style={{ height: 120, overflow: "hidden", borderRadius: "8px 8px 0 0" }}>
@@ -207,7 +300,7 @@ export default function DatasetGalleryPage({ datasetId }) {
               </div>
 
               <div style={{ position: "absolute", top: 3, right: 5, zIndex: 10 }}>
-               <Button
+                <Button
                   size="sm"
                   variant="outline-primary"
                   className="mt-1 p-1"
@@ -223,7 +316,7 @@ export default function DatasetGalleryPage({ datasetId }) {
 
               <Card.Body className="p-2 text-center">
                 <div style={{ fontSize: "0.8rem", color: themeColors.subtleText }}>{img.name}</div>
-               
+
               </Card.Body>
             </Card>
           </Col>

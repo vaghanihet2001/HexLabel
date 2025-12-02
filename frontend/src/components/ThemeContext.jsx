@@ -86,7 +86,16 @@ export const ThemeProvider = ({ children }) => {
 
     root.style.setProperty("--scroll-primary", themeColors.primary);
     root.style.setProperty("--scroll-accent", themeColors.accent);
-  }, [themeColors]);
+
+    // Select Arrow SVG (Data URI)
+    const arrowColor = theme === "light" ? "%23212529" : "%23ffffff";
+    const arrowSvg = `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='${arrowColor}' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e")`;
+    root.style.setProperty("--select-arrow", arrowSvg);
+
+    // Close button filter for dark mode
+    const btnFilter = theme === "light" ? "none" : "invert(1) grayscale(100%) brightness(200%)";
+    root.style.setProperty("--btn-close-filter", btnFilter);
+  }, [themeColors, theme]);
 
   const toggleTheme = () =>
     setTheme((prev) => (prev === "light" ? "dark" : "light"));

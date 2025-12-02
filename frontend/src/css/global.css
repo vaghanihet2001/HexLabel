@@ -267,3 +267,14 @@ textarea::placeholder {
 .sidebar-footer.collapsed {
   display: none;
 }
+
+
+/* ============================================================
+   custom buttons
+=============================================================== */
+.arrow-button {
+  border: none;
+  background: var(--primary);
+  color: var(--text);
+  cursor: pointer;
+}

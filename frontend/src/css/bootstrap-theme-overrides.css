@@ -5,15 +5,15 @@
 /* Override background + text + border */
 .form-control,
 .form-select {
-  background-color: var(--bs-form-control-bg) !important;
-  color: var(--bs-form-control-color) !important;
-  border-color: var(--bs-border-color) !important;
+  background-color: var(--inputBg) !important;
+  color: var(--inputText) !important;
+  border-color: var(--border) !important;
 }
 
 /* Focus style */
 .form-control:focus,
 .form-select:focus {
-  border-color: var(--bs-border-color) !important;
+  border-color: var(--accent) !important;
   box-shadow: none !important;
 }
 
@@ -37,3 +37,26 @@ input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   filter: var(--dp-icon-filter);
   opacity: 0.85;
 }
+
+/* Checkbox fixes */
+.form-check-input {
+  background-color: var(--inputBg);
+  border-color: var(--border);
+}
+
+.form-check-input:checked {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='M6 10l3 3l6-6'/%3e%3c/svg%3e");
+}
+
+.form-check-input:focus {
+  box-shadow: 0 0 0 0.25rem var(--shadow);
+  border-color: var(--accent);
+}
+
+/* Close button visibility fix */
+.btn-close {
+  filter: var(--btn-close-filter, none);
+}
+

@@ -5,7 +5,7 @@ import React, {
   useRef,
   useCallback,
 } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button,
   Spinner,
@@ -62,6 +62,7 @@ const uid = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 9
 export default function Annotate() {
   const { projectId, datasetId, jobId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { themeColors } = useTheme();
 
   const dsId = datasetId;
@@ -78,6 +79,7 @@ export default function Annotate() {
   const [zoom, setZoom] = useState(1);
   const [annotations, setAnnotations] = useState([]); // loaded for current image
   const [classes, setClasses] = useState([]); // [{id,name,color}]
+  const [defaultClassId, setDefaultClassId] = useState(null);
   const [newClassName, setNewClassName] = useState("");
   const [selectedAnnId, setSelectedAnnId] = useState(null);
 
@@ -104,15 +106,18 @@ export default function Annotate() {
       currentPoly: [], // normalized [x,y,...]
       mode: null,
     },
-    edit: {
-      annId: null,
-      type: null, // 'move' | 'corner' | 'vertex'
-      index: null, // index for corner/vertex
-      offset: null, // client offset during move
-    },
+    edit: { annId: null, type: null, index: null, offset: null }, // type: move, corner, vertex
     mouse: { cx: 0, cy: 0 },
     hover: { type: "none", annId: null, index: null },
+    defaultClassId: null,
+    classes: [],
   });
+
+  // Keep ref in sync
+  useEffect(() => {
+    stateRef.current.defaultClassId = defaultClassId;
+    stateRef.current.classes = classes;
+  }, [defaultClassId, classes]);
 
   // History state for undo/redo
   const [history, setHistory] = useState([]);
@@ -234,8 +239,8 @@ export default function Annotate() {
       // delete active
       try {
         const activeHandle = await annotationsHandle.getDirectoryHandle("active");
-        await activeHandle.removeEntry(`${imageId}.json`).catch(() => {});
-      } catch {}
+        await activeHandle.removeEntry(`${imageId}.json`).catch(() => { });
+      } catch { }
       // delete from all versions (if any)
       try {
         const versionsHandle = await annotationsHandle.getDirectoryHandle("versions");
@@ -243,10 +248,10 @@ export default function Annotate() {
           if (entry.kind !== "directory") continue;
           try {
             const vHandle = await versionsHandle.getDirectoryHandle(entry.name);
-            await vHandle.removeEntry(`${imageId}.json`).catch(() => {});
-          } catch {}
+            await vHandle.removeEntry(`${imageId}.json`).catch(() => { });
+          } catch { }
         }
-      } catch {}
+      } catch { }
     } catch (err) {
       // ignore
     }
@@ -257,7 +262,7 @@ export default function Annotate() {
     try {
       const imagesHandle = await folderHandle.getDirectoryHandle("images");
       const rawHandle = await imagesHandle.getDirectoryHandle("raw");
-      await rawHandle.removeEntry(imageName).catch(() => {});
+      await rawHandle.removeEntry(imageName).catch(() => { });
     } catch (err) {
       console.warn("deleteImageFile failed:", err);
     }
@@ -419,7 +424,16 @@ export default function Annotate() {
 
         if (!mounted) return;
         setImages(resolved);
-        setCurrentIdx(0);
+
+        // Deep linking: if ?imageId=... is present, jump to it
+        const targetImageId = searchParams.get("imageId");
+        if (targetImageId) {
+          const idx = resolved.findIndex((img) => img.id === targetImageId);
+          if (idx !== -1) setCurrentIdx(idx);
+          else setCurrentIdx(0);
+        } else {
+          setCurrentIdx(0);
+        }
 
         // derive classes from annotations in DB (all dataset annotations)
         const allAnn = await db.annotations.where("datasetId").equals(dsId).toArray();
@@ -433,6 +447,11 @@ export default function Annotate() {
         }
 
         setClasses(Array.from(labels.entries()).map(([name, color]) => ({ id: uid(), name, color })));
+
+        // Set first class as default if none set
+        if (!defaultClassId && labels.size > 0) {
+          // logic to set default if needed, or leave null to pick first in list dynamically
+        }
       } catch (err) {
         console.error("Load failed:", err);
       } finally {
@@ -444,7 +463,7 @@ export default function Annotate() {
       createdUrlsRef.current.forEach((u) => {
         try {
           URL.revokeObjectURL(u);
-        } catch {}
+        } catch { }
       });
       createdUrlsRef.current.clear();
       mounted = false;
@@ -745,28 +764,59 @@ export default function Annotate() {
           const cRect = container.getBoundingClientRect();
           const localX = m.cx - cRect.left;
           const localY = m.cy - cRect.top;
-          ctx.save();
-          ctx.strokeStyle = "rgba(255,255,255,1)";
-          ctx.lineWidth = 2;
-
+          // Double line for contrast (Black outer, White inner)
           ctx.beginPath();
           ctx.moveTo(localX, 0);
           ctx.lineTo(localX, localY - 20);
           ctx.moveTo(localX, localY + 20);
           ctx.lineTo(localX, canvas.height);
-          ctx.stroke();
-
-          ctx.beginPath();
           ctx.moveTo(0, localY);
           ctx.lineTo(localX - 20, localY);
           ctx.moveTo(localX + 20, localY);
           ctx.lineTo(canvas.width, localY);
+
+          ctx.lineCap = "square";
+
+          // Black outline
+          ctx.strokeStyle = "black";
+          ctx.lineWidth = 4;
           ctx.stroke();
 
+          // White inner
+          ctx.strokeStyle = "white";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // Dot with contrast
           ctx.beginPath();
-          ctx.fillStyle = "white";
           ctx.arc(localX, localY, 3, 0, Math.PI * 2);
+          ctx.fillStyle = "white";
           ctx.fill();
+          ctx.strokeStyle = "black";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // Current Drawing Label
+          // Current Drawing Label
+          const currentClasses = stateRef.current.classes;
+          const currentDefaultId = stateRef.current.defaultClassId;
+          const defClass = currentClasses.find(c => c.id === currentDefaultId) || currentClasses[0];
+          const activeClass = defClass?.name;
+
+          if (activeClass) {
+            ctx.font = "bold 12px sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+
+            // Text Halo for visibility
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 3;
+            ctx.strokeText(activeClass, localX + 10, localY - 10);
+
+            ctx.fillStyle = "white";
+            ctx.fillText(activeClass, localX + 10, localY - 10);
+          }
+
           ctx.restore();
         }
       } else {
@@ -776,9 +826,37 @@ export default function Annotate() {
           const localX = m.cx - cRect.left;
           const localY = m.cy - cRect.top;
           ctx.save();
-          ctx.fillStyle = "white";
+
+          // High contrast dot (White fill, Black stroke)
+          ctx.beginPath();
           ctx.arc(localX, localY, 3, 0, Math.PI * 2);
+          ctx.fillStyle = "white";
           ctx.fill();
+          ctx.strokeStyle = "black";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // Current Drawing Label (Show even if crosshair is off)
+          // Current Drawing Label (Show even if crosshair is off)
+          const currentClasses = stateRef.current.classes;
+          const currentDefaultId = stateRef.current.defaultClassId;
+          const defClass = currentClasses.find(c => c.id === currentDefaultId) || currentClasses[0];
+          const activeClass = defClass?.name;
+
+          if (activeClass) {
+            ctx.font = "bold 12px sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+
+            // Text Halo for visibility
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 3;
+            ctx.strokeText(activeClass, localX + 10, localY - 10);
+
+            ctx.fillStyle = "white";
+            ctx.fillText(activeClass, localX + 10, localY - 10);
+          }
+
           ctx.restore();
         }
       }
@@ -795,7 +873,7 @@ export default function Annotate() {
       cancelAnimationFrame(rafId);
       window.removeEventListener("resize", resizeCanvas);
     };
-  }, [annotations, selectedAnnId, crosshair, zoom, tool, images, currentIdx]);
+  }, [annotations, selectedAnnId, crosshair, zoom, tool, images, currentIdx, classes, defaultClassId]);
 
   /* -----------------------------
      Pointer event handlers: drawing / editing / pan / hover
@@ -869,6 +947,19 @@ export default function Annotate() {
             const dy = localY - ly;
             if (dx * dx + dy * dy <= 12 * 12) return { type: "vertex", annId: a.id, index: i / 2 };
           }
+
+          // Check edges for adding points
+          for (let i = 0; i < a.points.length; i += 2) {
+            const p1 = [a.points[i], a.points[i + 1]];
+            const p2 = [a.points[(i + 2) % a.points.length], a.points[(i + 3) % a.points.length]];
+            const [x1, y1] = normalizedToClient(p1[0], p1[1]);
+            const [x2, y2] = normalizedToClient(p2[0], p2[1]);
+
+            // Check distance to segment in client coords
+            const dist = distToSegment([clientX, clientY], [x1, y1], [x2, y2]);
+            if (dist < 8) return { type: "edge", annId: a.id, index: i / 2 };
+          }
+
           const rect = imageClientRect();
           if (!rect) continue;
           const nx = (localX - (rect.left - container.getBoundingClientRect().left)) / rect.width;
@@ -877,6 +968,14 @@ export default function Annotate() {
         }
       }
       return { type: "none" };
+    };
+
+    const distToSegment = (p, v, w) => {
+      const l2 = (w[0] - v[0]) ** 2 + (w[1] - v[1]) ** 2;
+      if (l2 === 0) return Math.hypot(p[0] - v[0], p[1] - v[1]);
+      let t = ((p[0] - v[0]) * (w[0] - v[0]) + (p[1] - v[1]) * (w[1] - v[1])) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(p[0] - (v[0] + t * (w[0] - v[0])), p[1] - (v[1] + t * (w[1] - v[1])));
     };
 
     const pointInPoly = (x, y, pts) => {
@@ -892,7 +991,7 @@ export default function Annotate() {
 
     const updateHover = (clientX, clientY) => {
       const hit = hitTestHandle(clientX, clientY);
-      if (hit.type === "corner" || hit.type === "vertex") {
+      if (hit.type === "corner" || hit.type === "vertex" || hit.type === "edge") {
         const hv = { type: hit.type, annId: hit.annId, index: hit.index };
         stateRef.current.hover = hv;
       } else {
@@ -941,9 +1040,41 @@ export default function Annotate() {
       updateHover(e.clientX, e.clientY);
       const hit = hitTestHandle(e.clientX, e.clientY);
 
-      if (hit.type === "corner" || hit.type === "vertex" || hit.type === "inside") {
+      if (hit.type === "corner" || hit.type === "vertex" || hit.type === "inside" || hit.type === "edge") {
         const ann = annotations.find((a) => a.id === hit.annId);
         if (!ann) return;
+
+        // Remove vertex (Alt + Click on vertex)
+        if (hit.type === "vertex" && ann.type === "poly" && e.altKey) {
+          if (ann.points.length > 6) { // Minimum 3 points (6 coords)
+            const idx = hit.index;
+            const newPts = [...ann.points];
+            newPts.splice(idx * 2, 2);
+            setAnnotations(p => p.map(a => a.id === ann.id ? { ...a, points: newPts } : a));
+          }
+          return;
+        }
+
+        // Add vertex (Click on edge)
+        if (hit.type === "edge" && ann.type === "poly") {
+          const idx = hit.index; // insert after this index
+          const norm = clientToNormalized(e.clientX, e.clientY);
+          if (norm) {
+            const newPts = [...ann.points];
+            // insert after index (2 coords per point)
+            newPts.splice((idx + 1) * 2, 0, norm[0], norm[1]);
+            setAnnotations(p => p.map(a => a.id === ann.id ? { ...a, points: newPts } : a));
+
+            // Immediately start dragging the new vertex
+            setSelectedAnnId(ann.id);
+            stateRef.current.mode = "editing";
+            stateRef.current.edit.annId = ann.id;
+            stateRef.current.edit.type = "vertex";
+            stateRef.current.edit.index = idx + 1;
+          }
+          return;
+        }
+
         setSelectedAnnId(ann.id);
         stateRef.current.mode = "editing";
         stateRef.current.edit.annId = ann.id;
@@ -1027,13 +1158,13 @@ export default function Annotate() {
             let cx = 0, cy = 0;
             for (let i = 0; i < pts.length; i += 2) {
               cx += pts[i];
-              cy += pts[i+1];
+              cy += pts[i + 1];
             }
-            cx /= (pts.length/2);
-            cy /= (pts.length/2);
+            cx /= (pts.length / 2);
+            cy /= (pts.length / 2);
             const dx = newCenterNx - cx;
             const dy = newCenterNy - cy;
-            const newPts = pts.map((v, i) => (i%2===0 ? Math.min(1, Math.max(0, v + dx)) : Math.min(1, Math.max(0, v + dy))));
+            const newPts = pts.map((v, i) => (i % 2 === 0 ? Math.min(1, Math.max(0, v + dx)) : Math.min(1, Math.max(0, v + dy))));
             setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
           }
         } else if (edit.type === "corner" && ann.type === "bbox") {
@@ -1048,13 +1179,13 @@ export default function Annotate() {
           } else if (edit.index === 3) {
             x1 = nx; y2 = ny;
           }
-          const newPts = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)].map((v) => Math.min(1, Math.max(0, v)));
+          const newPts = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)].map((v) => Math.min(1, Math.max(0, v)));
           setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: newPts } : it)));
         } else if (edit.type === "vertex" && ann.type === "poly") {
           const idx = edit.index;
           const pts = ann.points.slice();
-          pts[idx*2] = norm[0];
-          pts[idx*2+1] = norm[1];
+          pts[idx * 2] = norm[0];
+          pts[idx * 2 + 1] = norm[1];
           setAnnotations((p) => p.map((it) => (it.id === ann.id ? { ...it, points: pts } : it)));
         }
       }
@@ -1073,17 +1204,21 @@ export default function Annotate() {
             if (d.start && d.current) {
               const [x1, y1] = d.start;
               const [x2, y2] = d.current;
-              const bbox = [Math.min(x1,x2), Math.min(y1,y2), Math.max(x1,x2), Math.max(y1,y2)];
-              if (Math.abs(bbox[2]-bbox[0]) > 0.002 && Math.abs(bbox[3]-bbox[1]) > 0.002) {
+              const bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
+              if (Math.abs(bbox[2] - bbox[0]) > 0.002 && Math.abs(bbox[3] - bbox[1]) > 0.002) {
+                const currentClasses = stateRef.current.classes;
+                const currentDefaultId = stateRef.current.defaultClassId;
+                const defClass = currentClasses.find(c => c.id === currentDefaultId) || currentClasses[0];
                 const ann = {
                   id: uid(),
                   type: "bbox",
                   points: bbox,
-                  className: classes[0]?.name ?? "class",
-                  color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
+                  className: defClass?.name ?? "class",
+                  color: defClass?.color ?? colorForLabel(defClass?.name ?? "class"),
                   visible: true,
                 };
                 setAnnotations((p) => [...p, ann]);
+                setSelectedAnnId(ann.id); // Auto-select new annotation
               }
             }
           }
@@ -1111,15 +1246,19 @@ export default function Annotate() {
         e.preventDefault();
         const pts = d.currentPoly ?? [];
         if (pts.length >= 6) {
+          const currentClasses = stateRef.current.classes;
+          const currentDefaultId = stateRef.current.defaultClassId;
+          const defClass = currentClasses.find(c => c.id === currentDefaultId) || currentClasses[0];
           const ann = {
             id: uid(),
             type: "poly",
             points: pts,
-            className: classes[0]?.name ?? "class",
-            color: classes[0]?.color ?? colorForLabel(classes[0]?.name ?? "class"),
+            className: defClass?.name ?? "class",
+            color: defClass?.color ?? colorForLabel(defClass?.name ?? "class"),
             visible: true,
           };
           setAnnotations((p) => [...p, ann]);
+          setSelectedAnnId(ann.id); // Auto-select new annotation
         }
         d.inProgress = false;
         d.currentPoly = [];
@@ -1281,7 +1420,7 @@ export default function Annotate() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId, handMode, zoom]);
+  }, [annotations, classes, currentIdx, images, tool, dsId, selectedAnnId, handMode, zoom, defaultClassId]);
 
   /* -----------------------------
      Classes & annotation list helpers
@@ -1296,6 +1435,16 @@ export default function Annotate() {
     const c = { id: uid(), name, color: colorForLabel(name) };
     setClasses((p) => [c, ...p]);
     setNewClassName("");
+
+    // Auto-assign this new class to any annotations that have the default "class" label
+    setAnnotations((prev) =>
+      prev.map((a) => {
+        if (!a.className || a.className === "class") {
+          return { ...a, className: name, color: c.color };
+        }
+        return a;
+      })
+    );
   };
 
   const updateAnnotationClass = (annId, className) => {
@@ -1325,6 +1474,19 @@ export default function Annotate() {
   };
 
   const handleNextImage = () => {
+    // Validation: Check for unlabelled annotations
+    const unlabelled = annotations.some(
+      (a) => !a.className || a.className === "class"
+    );
+    if (unlabelled) {
+      openModal({
+        type: "error",
+        title: "Unlabelled Annotations",
+        message: "Please assign a class to all annotations before moving to the next image.",
+      });
+      return;
+    }
+
     if (currentIdx < images.length - 1) {
       setCurrentIdx((i) => Math.min(images.length - 1, i + 1));
     }
@@ -1366,7 +1528,7 @@ export default function Annotate() {
           // 2) Remove annotations from DB
           try {
             await db.annotations.where("datasetId").equals(dsId).and(a => a.imageName === img.name).delete();
-          } catch {}
+          } catch { }
 
           // 3) Remove image row from DB
           await db.images.delete(img.id);
@@ -1378,7 +1540,7 @@ export default function Annotate() {
               const newIds = (jb.imageIds || []).filter(x => x !== img.id);
               await db.jobs.update(jb.id, { imageIds: newIds });
             }
-          } catch {}
+          } catch { }
 
           // 5) Update UI state
           setImages((imgs) => imgs.filter((i, idx) => i.id !== img.id));
@@ -1418,7 +1580,9 @@ export default function Annotate() {
             <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Redo</td></tr>
             <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save</td></tr>
             <tr><td><kbd>Delete</kbd></td><td>Delete Selected</td></tr>
-            <tr><td><kbd>Enter</kbd></td><td>Complete Polygon</td></tr>
+            <tr><td><kbd>Right Click</kbd></td><td>Complete Polygon</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Click</kbd></td><td>Add point to Polygon</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>Click</kbd></td><td>Remove point from Polygon</td></tr>
           </tbody>
         </table>
       </Modal.Body>
@@ -1732,7 +1896,7 @@ export default function Annotate() {
                   }}
                 >
                   <div style={{ display: "flex", gap: 8 }}>
-                    <Button size="sm" variant="light" onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}>
+                    <Button size="sm" className="arrow-button" onClick={handlePrevImage}>
                       <ChevronLeft size={16} />
                     </Button>
                   </div>
@@ -1742,7 +1906,7 @@ export default function Annotate() {
                   </div>
 
                   <div style={{ display: "flex", gap: 8 }}>
-                    <Button size="sm" variant="light" onClick={() => setCurrentIdx((i) => Math.min(images.length - 1, i + 1))}>
+                    <Button size="sm" className="arrow-button" onClick={handleNextImage}>
                       <ChevronRight size={16} />
                     </Button>
                   </div>
@@ -1783,70 +1947,14 @@ export default function Annotate() {
                 borderRight: `1px solid ${themeColors.border}`,
                 background: themeColors.sidebarBg,
                 padding: 8,
-                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
                 transition: "width 0.2s",
                 position: "relative",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <h6 style={{ margin: 0 }}>Annotations</h6>
-                <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
-              </div>
-
-              <div style={{ marginBottom: 8, width: '100%' }}>
-                {annotations.length === 0 ? (
-                  <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
-                ) : (
-                  <ListGroup>
-                    {annotations.map((a) => (
-                      <ListGroup.Item
-                        key={a.id}
-                        active={a.id === selectedAnnId}
-                        onClick={() => setSelectedAnnId(a.id)}
-                        style={{
-                          display: "flex",
-                          gap: 8,
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          color: themeColors.text,
-                          backgroundColor: themeColors.cardBg,
-                          border: `1px solid ${themeColors.border}`,
-                        }}
-                      >
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                          <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
-                          <div style={{ flex: 1 }}>
-                            <Form.Select
-                              size="sm"
-                              value={a.className}
-                              onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
-                            >
-                              {classes.map((c) => (
-                                <option key={c.id} value={c.name}>
-                                  {c.name}
-                                </option>
-                              ))}
-                            </Form.Select>
-                          </div>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
-                            {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
-                          </Button>
-                          <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
-                            <Trash2 size={14} />
-                          </Button>
-                        </div>
-                      </ListGroup.Item>
-                    ))}
-                  </ListGroup>
-                )}
-              </div>
-
-              <hr />
-
-              <div style={{ marginBottom: 8 }}>
+              {/* 1. Classes Section (Fixed at Top) */}
+              <div style={{ marginBottom: 8, flexShrink: 0 }}>
                 <h6 style={{ marginBottom: 8 }}>Classes</h6>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <InputGroup>
@@ -1862,7 +1970,7 @@ export default function Annotate() {
                   </InputGroup>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
                   {classes.map((c) => (
                     <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -1879,6 +1987,14 @@ export default function Annotate() {
                         >
                           Assign
                         </Button>
+                        <Button
+                          size="sm"
+                          variant={defaultClassId === c.id ? "primary" : "outline-secondary"}
+                          onClick={() => setDefaultClassId(c.id)}
+                          title="Set as default class for new annotations"
+                        >
+                          {defaultClassId === c.id ? "Default" : "Set Default"}
+                        </Button>
                       </div>
                     </div>
                   ))}
@@ -1887,16 +2003,68 @@ export default function Annotate() {
 
               <hr />
 
-              <div style={{ display: "flex", gap: 8 }}>
-                <Button variant="outline-secondary" onClick={() => { setCurrentIdx((i) => Math.max(0, i - 1)); }}>
-                  <ChevronLeft size={14} /> Prev
-                </Button>
-                <Button variant="outline-secondary" onClick={() => { setCurrentIdx((i) => Math.min(images.length - 1, i + 1)); }}>
-                  Next <ChevronRight size={14} />
-                </Button>
-                <div style={{ marginLeft: "auto", color: themeColors.subtleText, alignSelf: "center" }}>
-                  {currentIdx + 1}/{images.length}
+              {/* 2. Annotations List (Scrollable) */}
+              <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <h6 style={{ margin: 0 }}>Annotations</h6>
+                  <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
                 </div>
+
+                <div style={{ width: '100%' }}>
+                  {annotations.length === 0 ? (
+                    <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
+                  ) : (
+                    <ListGroup>
+                      {annotations.map((a) => (
+                        <ListGroup.Item
+                          key={a.id}
+                          active={a.id === selectedAnnId}
+                          onClick={() => setSelectedAnnId(a.id)}
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            color: themeColors.text,
+                            backgroundColor: themeColors.cardBg,
+                            border: `1px solid ${themeColors.border}`,
+                          }}
+                        >
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                            <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
+                            <div style={{ flex: 1 }}>
+                              <Form.Select
+                                size="sm"
+                                value={a.className}
+                                onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
+                              >
+                                {classes.map((c) => (
+                                  <option key={c.id} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </Form.Select>
+                            </div>
+                          </div>
+
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
+                              {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                            </Button>
+                            <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
+                              <Trash2 size={14} />
+                            </Button>
+                          </div>
+                        </ListGroup.Item>
+                      ))}
+                    </ListGroup>
+                  )}
+                </div>
+              </div>
+
+              {/* 3. Footer Info (Optional, removed buttons) */}
+              <div style={{ marginTop: 8, borderTop: `1px solid ${themeColors.border}`, paddingTop: 8, textAlign: "center", color: themeColors.subtleText }}>
+                Image {currentIdx + 1} of {images.length}
               </div>
             </div>
           )}

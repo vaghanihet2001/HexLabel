@@ -391,6 +391,13 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
                     height: "100%",
                     objectFit: "cover",
                   }}
+                  onError={(e) => {
+                    if (img.blob) {
+                      const newUrl = URL.createObjectURL(img.blob);
+                      e.target.src = newUrl;
+                      createdUrlsRef.current.add(newUrl);
+                    }
+                  }}
                 />
               </div>
 
