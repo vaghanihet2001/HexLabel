@@ -246,5 +246,33 @@ export async function readJobFile(datasetHandle, jobId) {
 // Delete job file
 export async function deleteJobFile(datasetHandle, jobId) {
   const jobsFolder = await datasetHandle.getDirectoryHandle("jobs");
-  await jobsFolder.removeEntry(`${jobId}.json`);
+
+await jobsFolder.removeEntry(`${jobId}.json`);
+}
+
+// Write version metadata inside /versions/
+export async function writeVersionFile(datasetHandle, version) {
+  const versionsFolder = await datasetHandle.getDirectoryHandle("versions", { create: true });
+  const fh = await versionsFolder.getFileHandle(`${version.id}.json`, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(JSON.stringify(version, null, 2));
+  await writable.close();
+}
+
+// Read version file
+export async function readVersionFile(datasetHandle, versionId) {
+  const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
+  const fh = await versionsFolder.getFileHandle(`${versionId}.json`);
+  const file = await fh.getFile();
+  return JSON.parse(await file.text());
+}
+
+// Delete version file
+export async function deleteVersionFile(datasetHandle, versionId) {
+  try {
+    const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
+    await versionsFolder.removeEntry(`${versionId}.json`);
+  } catch (e) {
+    console.warn("Failed to delete version file", e);
+  }
 }
