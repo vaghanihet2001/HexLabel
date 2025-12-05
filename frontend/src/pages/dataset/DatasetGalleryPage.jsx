@@ -142,6 +142,19 @@ export default function DatasetGalleryPage({ datasetId }) {
   const deleteSelectedImages = async () => {
     if (selectedImages.size === 0) return;
 
+    // Check if dataset has versions
+    const versionCount = await db.datasetVersions.where("datasetId").equals(datasetId).count();
+    if (versionCount > 0) {
+      openModal({
+        type: "info",
+        title: "Cannot Delete Images",
+        message: "This dataset has saved versions. Deleting images would break these versions. Please delete the versions first if you wish to remove images.",
+        confirmText: "OK",
+        onConfirm: () => closeModal(),
+      });
+      return;
+    }
+
     openModal({
       type: "confirm",
       title: "Delete Images?",

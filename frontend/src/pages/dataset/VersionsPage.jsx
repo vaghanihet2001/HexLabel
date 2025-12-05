@@ -4,8 +4,8 @@ import { Button, ListGroup, Form } from "react-bootstrap";
 import { Pencil, Trash2, CheckCircle2, Settings, Download } from "lucide-react";
 import { useTheme } from "../../components/ThemeContext";
 import { db, generateId } from "../../utils/db";
-import { writeVersionFile, deleteVersionFile } from "../../utils/fs";
-import { exportVersionToYolo } from "../../utils/exportUtils";
+import { writeVersionFile, deleteVersionFile, scanVersionsFromDatasetFolder } from "../../utils/fs";
+import { exportDatasetVersion } from "../../utils/exportUtils";
 import AppModal from "../../components/AppModal";
 
 export default function VersionsPage({ datasetId: propDatasetId }) {
@@ -22,6 +22,8 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [versionToDelete, setVersionToDelete] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState("yolo-hbb");
 
   // creation form states
   const [mode, setMode] = useState("view"); // view | create
@@ -38,6 +40,29 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
       setDataset(ds || null);
       const dt = new Date().toISOString().replace(/[:.]/g, "-");
       setName(`${ds?.name || "dataset"}-${dt}`);
+
+      // Sync from FS if possible
+      if (ds) {
+        try {
+          let dsHandle = ds.folderHandle;
+          if (!dsHandle && ds.projectId) {
+            const proj = await db.projects.get(ds.projectId);
+            if (proj?.folderHandle) {
+              dsHandle = await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null);
+            }
+          }
+
+          if (dsHandle) {
+            const fsVersions = await scanVersionsFromDatasetFolder(dsHandle);
+            if (fsVersions.length > 0) {
+              await db.datasetVersions.bulkPut(fsVersions);
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to sync versions from FS", err);
+        }
+      }
+
       const vs = await db.datasetVersions.where("datasetId").equals(datasetId).toArray();
       setVersions(vs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
     })();
@@ -49,10 +74,22 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
 
     const id = generateId?.() || (crypto.randomUUID && crypto.randomUUID());
 
-    // 1. Get current annotations snapshot (optional: if you want to freeze annotations)
-    // For now, we just store the split config. 
-    // If we wanted to snapshot data, we'd query db.annotations and save them.
-    // The user request implies "writing data in database to file folder", which usually means the version config.
+    // 1. Get current annotations snapshot
+    // We fetch all annotations for this dataset that are NOT associated with a specific version (i.e. current working state)
+    // In this app, "current" annotations might have versionId=null or undefined.
+    // However, the schema says `annotations: "id, datasetId, imageId, versionId"`.
+    // We assume current annotations have versionId missing or null.
+    const currentAnns = await db.annotations
+      .where("datasetId").equals(datasetId)
+      .filter(a => !a.versionId)
+      .toArray();
+
+    const snapshotAnns = currentAnns.map(a => ({
+      ...a,
+      id: generateId(), // new ID for the snapshot record
+      versionId: id,    // link to this version
+      originalAnnotationId: a.id // optional: track lineage
+    }));
 
     const ver = {
       id, datasetId, name, description,
@@ -63,6 +100,9 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
     try {
       // DB
       await db.datasetVersions.put(ver);
+      if (snapshotAnns.length > 0) {
+        await db.annotations.bulkPut(snapshotAnns);
+      }
 
       // FS
       if (dataset?.folderHandle) {
@@ -130,21 +170,25 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
     URL.revokeObjectURL(url);
   };
 
-  const handleExportDataset = async (vid) => {
-    const v = versions.find(x => x.id === vid);
+  const handleExportClick = (vid) => {
+    setSelected(vid);
+    setShowExportModal(true);
+  };
+
+  const handleExportConfirm = async () => {
+    const v = versions.find(x => x.id === selected);
     if (!v) return;
-    if (!window.confirm(`Export dataset version "${v.name}" to YOLO format? This may take a while.`)) return;
 
     setExporting(true);
     try {
-      // We need project object too
       const proj = await db.projects.get(dataset.projectId);
-      await exportVersionToYolo(v, dataset, proj);
+      await exportDatasetVersion(v, dataset, proj, exportFormat);
     } catch (err) {
       console.error("Export failed", err);
       alert("Export failed: " + err.message);
     } finally {
       setExporting(false);
+      setShowExportModal(false);
     }
   };
 
@@ -169,8 +213,8 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
           <div>
             <Button size="sm" variant="outline-secondary" onClick={() => { setMode("create"); setSelected(null); }}>+ Create Version</Button>{' '}
             <Button size="sm" variant="primary" onClick={() => { if (selected) exportVersion(selected); }} disabled={!selected}>Export Config</Button>{' '}
-            <Button size="sm" variant="success" onClick={() => { if (selected) handleExportDataset(selected); }} disabled={!selected || exporting}>
-              {exporting ? "Exporting..." : "Export Dataset (YOLO)"}
+            <Button size="sm" variant="success" onClick={() => { if (selected) handleExportClick(selected); }} disabled={!selected || exporting}>
+              {exporting ? "Exporting..." : "Export Dataset"}
             </Button>
           </div>
         </div>
@@ -324,6 +368,28 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
           onConfirm={confirmDelete}
         >
           <p>Are you sure you want to delete this version configuration? This action cannot be undone.</p>
+        </AppModal>
+
+        {/* Export Modal */}
+        <AppModal
+          show={showExportModal}
+          onHide={() => setShowExportModal(false)}
+          title="Export Dataset"
+          confirmText={exporting ? "Exporting..." : "Export"}
+          confirmVariant="success"
+          onConfirm={handleExportConfirm}
+          disabled={exporting}
+        >
+          <Form.Group>
+            <Form.Label>Select Format</Form.Label>
+            <Form.Select value={exportFormat} onChange={e => setExportFormat(e.target.value)}>
+              <option value="yolo-hbb">YOLO Bounding Box (HBB)</option>
+              <option value="yolo-segment">YOLO Segmentation (Polygon)</option>
+            </Form.Select>
+            <Form.Text className="text-muted">
+              {exportFormat === "yolo-hbb" ? "Standard YOLO format for object detection (class xc yc w h)." : "YOLO format for instance segmentation (class x1 y1 x2 y2 ...)."}
+            </Form.Text>
+          </Form.Group>
         </AppModal>
       </div>
 

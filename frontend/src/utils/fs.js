@@ -247,7 +247,7 @@ export async function readJobFile(datasetHandle, jobId) {
 export async function deleteJobFile(datasetHandle, jobId) {
   const jobsFolder = await datasetHandle.getDirectoryHandle("jobs");
 
-await jobsFolder.removeEntry(`${jobId}.json`);
+  await jobsFolder.removeEntry(`${jobId}.json`);
 }
 
 // Write version metadata inside /versions/
@@ -275,4 +275,32 @@ export async function deleteVersionFile(datasetHandle, versionId) {
   } catch (e) {
     console.warn("Failed to delete version file", e);
   }
+}
+
+/**
+ * scanVersionsFromDatasetFolder
+ * Scans /versions/ folder for JSON files and returns them
+ */
+export async function scanVersionsFromDatasetFolder(datasetHandle) {
+  const versions = [];
+  try {
+    const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
+    for await (const entry of versionsFolder.values()) {
+      if (entry.kind === "file" && entry.name.endsWith(".json")) {
+        try {
+          const file = await entry.getFile();
+          const text = await file.text();
+          const ver = JSON.parse(text);
+          if (ver && ver.id) {
+            versions.push(ver);
+          }
+        } catch (err) {
+          console.warn("Failed to parse version file", entry.name, err);
+        }
+      }
+    }
+  } catch (err) {
+    // versions folder might not exist
+  }
+  return versions;
 }
