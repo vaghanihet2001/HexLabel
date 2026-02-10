@@ -3,8 +3,9 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button, Card, Row, Col, Form, Spinner } from "react-bootstrap";
 import { db } from "../../utils/db";
 import { useTheme } from "../../components/ThemeContext";
-import { CheckSquare, Square, UploadCloud } from "lucide-react";
+import { CheckSquare, Square, UploadCloud, Video } from "lucide-react";
 import AppModal from "../../components/AppModal";
+import VideoImportModal from "../../components/VideoImportModal";
 
 import {
   readDatasetMetadata,
@@ -21,6 +22,10 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
   const [dragActive, setDragActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState("");
+
+  // Video State
+  const [showVideoModal, setShowVideoModal] = useState(false);
+  const [videoFile, setVideoFile] = useState(null);
 
   const createdUrlsRef = useRef(new Set());
 
@@ -40,6 +45,42 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
 
   const openModal = (d) => setModal({ ...modal, ...d, show: true });
   const closeModal = () => setModal({ ...modal, show: false });
+
+  // -----------------------------
+  // VIDEO MODAL HANDLERS
+  // -----------------------------
+  const handleVideoExtractComplete = async (blobs, videoName) => {
+    // Convert blobs to image objects
+    const newImgs = [];
+    const baseName = videoName.substring(0, videoName.lastIndexOf('.')) || videoName;
+
+    for (let i = 0; i < blobs.length; i++) {
+      const blob = blobs[i];
+      const id = crypto.randomUUID();
+      const url = URL.createObjectURL(blob);
+
+      // Pad frame number
+      const frameNum = String(i + 1).padStart(5, '0');
+      const name = `${baseName}_frame_${frameNum}.jpg`;
+
+      const img = {
+        id,
+        datasetId,
+        name,
+        originalName: name,
+        blob,
+        url,
+        createdAt: new Date().toISOString(),
+      };
+
+      await db.tempImages.put(img);
+      newImgs.push(img);
+    }
+
+    setImages((p) => [...p, ...newImgs]);
+    setShowVideoModal(false);
+    setVideoFile(null);
+  };
 
   // -----------------------------
   // DRAG + DROP
@@ -115,12 +156,22 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
   // UPLOAD FILES
   // -----------------------------
   const handleFiles = async (files) => {
-    const valid = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    const fileList = Array.from(files);
+
+    // Check for video first
+    const video = fileList.find(f => f.type.startsWith("video/"));
+    if (video) {
+      setVideoFile(video);
+      setShowVideoModal(true);
+      return; // Only process one video at a time for now, or prioritize video
+    }
+
+    const valid = fileList.filter((f) => f.type.startsWith("image/"));
     if (!valid.length) {
       openModal({
         type: "error",
         title: "Invalid files",
-        message: "Only image files allowed."
+        message: "Only image or video files allowed."
       });
       return;
     }
@@ -326,6 +377,13 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
     >
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
 
+      <VideoImportModal
+        show={showVideoModal}
+        onHide={() => setShowVideoModal(false)}
+        file={videoFile}
+        onExtractComplete={handleVideoExtractComplete}
+      />
+
       {loading && (
         <div
           style={{
@@ -344,8 +402,8 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
       )}
 
       <div className="text-center mb-4">
-        <h5><UploadCloud size={20} /> Upload Images</h5>
-        <Form.Control type="file" multiple accept="image/*"
+        <h5><UploadCloud size={20} /> Upload Images or Video</h5>
+        <Form.Control type="file" multiple accept="image/*,video/*"
           onChange={(e) => handleFiles(e.target.files)} />
       </div>
 
