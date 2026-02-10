@@ -539,67 +539,72 @@ export default function Annotate() {
   /* -----------------------------
      AUTOSAVE (debounced) — writes DB + filesystem
   ----------------------------- */
+
+  // Helper to perform the actual save immediately
+  const saveImageAnnotations = useCallback(async (img, currentAnnotations) => {
+    if (!img) return;
+    try {
+      const payload = {
+        datasetId: dsId,
+        imageId: img.id,
+        imageName: img.name,
+        data: currentAnnotations,
+        updatedAt: new Date().toISOString(),
+        versionId: null, // active annotations (working copy)
+      };
+
+      // Upsert DB
+      const existing = await db.annotations
+        .where("datasetId")
+        .equals(dsId)
+        .and((a) => a.imageName === img.name)
+        .first();
+
+      if (existing) {
+        await db.annotations.update(existing.id, payload);
+      } else {
+        payload.id = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+        await db.annotations.add(payload);
+      }
+
+      // Write filesystem active annotation file (imageId.json)
+      const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+      if (dsFolder) {
+        const filePayload = {
+          imageId: img.id,
+          imageName: img.name,
+          datasetId: dsId,
+          annotations: currentAnnotations,
+          updatedAt: new Date().toISOString(),
+          versionId: null,
+        };
+        await writeAnnotationFile(dsFolder, img.id, filePayload, null);
+      }
+    } catch (err) {
+      console.error("❌ Failed save:", err);
+    }
+  }, [dsId, dataset, project]);
+
   const scheduleSave = useCallback(() => {
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
 
-    autosaveTimer.current = setTimeout(async () => {
-      const img = images[currentIdx];
-      if (!img) return;
-
-      try {
-        const payload = {
-          datasetId: dsId,
-          imageId: img.id,
-          imageName: img.name,
-          data: annotationsRef.current,
-          updatedAt: new Date().toISOString(),
-          versionId: null, // active annotations (working copy)
-        };
-
-        // Upsert DB
-        const existing = await db.annotations
-          .where("datasetId")
-          .equals(dsId)
-          .and((a) => a.imageName === img.name)
-          .first();
-
-        if (existing) {
-          await db.annotations.update(existing.id, payload);
-        } else {
-          payload.id = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
-          await db.annotations.add(payload);
-        }
-
-        // Write filesystem active annotation file (imageId.json)
-        const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
-        if (dsFolder) {
-          const filePayload = {
-            imageId: img.id,
-            imageName: img.name,
-            datasetId: dsId,
-            annotations: annotationsRef.current,
-            updatedAt: new Date().toISOString(),
-            versionId: null,
-          };
-          await writeAnnotationFile(dsFolder, img.id, filePayload, null);
-        }
-
-        // console log for debugging
-        // console.log("✅ autosaved:", img.name);
-      } catch (err) {
-        console.error("❌ Failed autosave:", err);
-      }
-    }, 800);
-  }, [currentIdx, images, dsId, dataset, project]);
+    autosaveTimer.current = setTimeout(() => {
+      saveImageAnnotations(images[currentIdx], annotationsRef.current);
+    }, 500);
+  }, [currentIdx, images, saveImageAnnotations]);
 
   useEffect(() => {
     if (images.length === 0) return;
     scheduleSave();
 
     return () => {
-      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      if (autosaveTimer.current) {
+        clearTimeout(autosaveTimer.current);
+        // Force immediate save for the image we are leaving
+        saveImageAnnotations(images[currentIdx], annotationsRef.current);
+      }
     };
-  }, [currentIdx, images, scheduleSave]);
+  }, [currentIdx, images, scheduleSave, saveImageAnnotations]);
 
   /* -----------------------------
      Canvas drawing, rendering & interactions

@@ -8,7 +8,7 @@ import {
 
 /**
  * 🔥 MAIN ENTRY POINT
- * Call this from ProjectsPage when user selects a project folder
+ * It is called from ProjectsPage when user selects a project folder
  *
  * await rebuildDatabaseFromProject(projectFolderHandle);
  */

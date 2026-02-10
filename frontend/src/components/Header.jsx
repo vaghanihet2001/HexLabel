@@ -63,11 +63,7 @@ const Header = () => {
           className="img-fluid"
           style={{ height: "40px" }}
         />
-        <span className="fw-bold fs-3" style={{
-          background: `linear-gradient(90deg, ${themeColors.primary}, ${themeColors.accent})`,
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent",
-        }}>HexLabel</span>
+        <span className="fw-bold fs-3 text-gradient-primary">HexLabel</span>
       </div>
 
       {/* Right side buttons */}

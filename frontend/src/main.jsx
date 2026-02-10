@@ -7,6 +7,7 @@ import "./css/styles.css";
 import { ThemeProvider } from "./components/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import LoginPage from "./pages/LoginPage";
+import ToastConfig from "./components/ToastConfig";
 
 function AppWithAuth() {
   const { user, loading } = useAuth();
@@ -23,7 +24,7 @@ function AppWithAuth() {
     if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '0')) {
       e.preventDefault();
     }
-});
+  });
 
   if (loading) {
     return (
@@ -51,6 +52,7 @@ function AppWithAuth() {
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <ThemeProvider>
+      <ToastConfig />
       <AuthProvider>
         <AppWithAuth />
       </AuthProvider>

@@ -11,6 +11,7 @@ import VersionsPage from "./dataset/VersionsPage";
 import ClassesTagsPage from "./dataset/ClassesTagsPage";
 
 import { db } from "../utils/db";
+import "../css/dataset-tabs.css";
 
 export default function DatasetPage() {
   const { projectId, datasetId } = useParams();
@@ -107,8 +108,10 @@ export default function DatasetPage() {
           activeKey={activeTab}
           onSelect={(k) => setActiveTab(k)}
           justify
+          className="custom-hex-tabs"
           style={{
             borderBottom: `1px solid ${themeColors.border}`,
+
           }}
         >
           <Tab eventKey="upload" title="📤 Upload Images" />
@@ -119,7 +122,7 @@ export default function DatasetPage() {
         </Tabs>
 
         {/* TAB CONTENT */}
-        <div style={{ flexGrow: 1, overflowY: "auto" }}>
+        <div style={{ flexGrow: 1, overflowY: "auto", marginTop: "1rem" }}>
           {activeTab === "upload" && (
             <UploadImagesPage
               dataset={dataset}

@@ -5,7 +5,7 @@ import { Pencil, Trash2, CheckCircle2, Settings, Download } from "lucide-react";
 import { useTheme } from "../../components/ThemeContext";
 import { db, generateId } from "../../utils/db";
 import { writeVersionFile, deleteVersionFile, scanVersionsFromDatasetFolder } from "../../utils/fs";
-import { exportDatasetVersion } from "../../utils/exportUtils";
+import { exportDatasetVersion, EXPORT_FORMATS } from "../../utils/exportUtils";
 import AppModal from "../../components/AppModal";
 
 export default function VersionsPage({ datasetId: propDatasetId }) {
@@ -23,7 +23,7 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
   const [versionToDelete, setVersionToDelete] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [exportFormat, setExportFormat] = useState("yolo-hbb");
+  const [exportFormat, setExportFormat] = useState(EXPORT_FORMATS[0].value);
 
   // creation form states
   const [mode, setMode] = useState("view"); // view | create
@@ -383,11 +383,12 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
           <Form.Group>
             <Form.Label>Select Format</Form.Label>
             <Form.Select value={exportFormat} onChange={e => setExportFormat(e.target.value)}>
-              <option value="yolo-hbb">YOLO Bounding Box (HBB)</option>
-              <option value="yolo-segment">YOLO Segmentation (Polygon)</option>
+              {EXPORT_FORMATS.map(fmt => (
+                <option key={fmt.value} value={fmt.value}>{fmt.label}</option>
+              ))}
             </Form.Select>
             <Form.Text className="text-muted">
-              {exportFormat === "yolo-hbb" ? "Standard YOLO format for object detection (class xc yc w h)." : "YOLO format for instance segmentation (class x1 y1 x2 y2 ...)."}
+              {EXPORT_FORMATS.find(f => f.value === exportFormat)?.description}
             </Form.Text>
           </Form.Group>
         </AppModal>

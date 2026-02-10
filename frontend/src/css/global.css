@@ -2,7 +2,8 @@
    GLOBAL VARIABLES (injected from ThemeContext)
 =============================================================== */
 
-html, body {
+html,
+body {
   background: var(--background) !important;
   color: var(--text) !important;
   font-family: "Inter", sans-serif;
@@ -67,6 +68,7 @@ textarea::placeholder {
   color: var(--primary) !important;
   border-color: var(--primary) !important;
 }
+
 .btn-outline-primary:hover {
   background: var(--primary) !important;
   color: white !important;
@@ -77,6 +79,7 @@ textarea::placeholder {
   color: var(--error) !important;
   border-color: var(--error) !important;
 }
+
 .btn-outline-danger:hover {
   background: var(--error) !important;
   color: white !important;
@@ -87,15 +90,18 @@ textarea::placeholder {
   color: var(--subtleText) !important;
   border-color: var(--border) !important;
 }
+
 .btn-outline-secondary:hover {
   background: var(--hoverBg) !important;
 }
 
 /* OUTLINE WARNING */
 .btn-outline-warning {
-  color: #eab308 !important; /* gold */
+  color: #eab308 !important;
+  /* gold */
   border-color: #eab308 !important;
 }
+
 .btn-outline-warning:hover {
   background: #eab308 !important;
   color: black !important;
@@ -103,9 +109,11 @@ textarea::placeholder {
 
 /* CLOSE BUTTON (modal X) */
 .btn-close {
-  filter: invert(1); /* visible in dark mode */
+  filter: invert(1);
+  /* visible in dark mode */
   opacity: 0.7;
 }
+
 .btn-close:hover {
   opacity: 1;
 }
@@ -277,4 +285,18 @@ textarea::placeholder {
   background: var(--primary);
   color: var(--text);
   cursor: pointer;
+}
+
+/* ============================================================
+   TEXT UTILITIES
+=============================================================== */
+.text-gradient-primary {
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  /* Fallback */
+  display: inline-block;
+  /* Ensure block model for gradient */
 }

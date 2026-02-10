@@ -3,6 +3,22 @@ import { saveAs } from "file-saver";
 import { db } from "./db";
 
 /**
+ * Export Formats Definition
+ */
+export const EXPORT_FORMATS = [
+    {
+        value: "yolo-hbb",
+        label: "YOLO Bounding Box (HBB)",
+        description: "Standard YOLO format for object detection (class xc yc w h)."
+    },
+    {
+        value: "yolo-segment",
+        label: "YOLO Segmentation (Polygon)",
+        description: "YOLO format for instance segmentation (class x1 y1 x2 y2 ...)."
+    }
+];
+
+/**
  * Export Registry
  */
 const exporters = {

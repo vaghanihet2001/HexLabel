@@ -1,0 +1,48 @@
+/* Custom Tab Styles for HexLabel - ThemeContext Integration */
+
+/* 1. Base nav-tabs border */
+.custom-hex-tabs .nav-tabs {
+    border-bottom: 1px solid var(--border) !important;
+}
+
+/* 2. Default State of Tabs (inactive) */
+.custom-hex-tabs .nav-link {
+    color: var(--subtleText) !important;
+    background-color: transparent !important;
+    border: 1px solid transparent !important;
+    /* Prepare for border hover */
+    border-bottom: none !important;
+    /* Bottom border handled by container or active state logic */
+    transition: all 0.2s ease-in-out;
+    font-weight: 500;
+    margin-bottom: -1px;
+    /* Align with border */
+}
+
+/* 3. Hover State */
+.custom-hex-tabs .nav-link:hover {
+    color: var(--text) !important;
+    /* White in dark mode, Dark in light mode */
+    background-color: var(--hoverBg) !important;
+    border-color: var(--border) !important;
+    /* Border around tab on hover */
+    border-bottom-color: transparent !important;
+    /* Open bottom to merge with content */
+}
+
+/* 4. Active State */
+.custom-hex-tabs .nav-link.active {
+    color: var(--primary) !important;
+    background-color: var(--cardBg) !important;
+    /* Match container bg */
+    border-color: var(--border) var(--border) transparent !important;
+    /* Top, Right+Left, Bottom transparent */
+    border-bottom: 3px solid transparent !important;
+    /* Visual trick, or use box-shadow to indicate active */
+    box-shadow: inset 0 3px 0 0 var(--primary);
+    /* subtle top bar for active */
+    font-weight: 600;
+}
+
+/* Specific Tweak: Ensure white text on hover in dark mode explicitly if --text isn't white enough (it is #ffffff in darkTheme) */
+/* The variables --text and --hoverBg already switch based on theme, so no media query or data attribute needed if context is working correctly. */
