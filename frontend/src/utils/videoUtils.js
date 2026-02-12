@@ -67,8 +67,10 @@ export const extractFrames = async (file, extractRate, _totalDuration, onProgres
             video.playsInline = true;
 
             // Wait for metadata
-            await new Promise((res) => {
-                video.onloadedmetadata = () => res();
+            // Wait for metadata
+            await new Promise((resolve, reject) => {
+                video.onloadedmetadata = () => resolve();
+                video.onerror = () => reject(new Error("Video failed to load: " + (video.error ? video.error.message : "unknown error")));
             });
 
             const duration = video.duration;
