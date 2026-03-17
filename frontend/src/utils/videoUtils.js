@@ -1,5 +1,5 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile } from '@ffmpeg/util';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
 /* =========================================================
    GLOBAL FFmpeg INSTANCE
@@ -13,25 +13,31 @@ const loadFFmpeg = async () => {
         throw new Error("FFmpeg requires crossOriginIsolated=true");
     }
 
-    const baseURL = `${window.location.origin}/ffmpeg`;
+    // ✅ CDN base URL (NO local files)
+    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
 
     const ffmpeg = new FFmpeg();
 
     try {
+        // ✅ Convert CDN files to blob URLs (fixes CORS issues)
+        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
+        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
+
         await ffmpeg.load({
-            coreURL: `${baseURL}/ffmpeg-core.js`,
-            wasmURL: `${baseURL}/ffmpeg-core.wasm`,
+            coreURL,
+            wasmURL,
         });
+
     } catch (err) {
         console.error("FFmpeg LOAD ERROR:", err);
 
         throw new Error(`
-FFmpeg failed to load (ESM mode)
+FFmpeg failed to load (CDN mode)
 
 Check:
-- Correct files from dist/esm
-- No UMD files
-- Correct paths
+- Internet connection
+- CDN accessibility
+- crossOrigin isolation headers
 
 Actual:
 ${err?.stack || err}
@@ -41,6 +47,7 @@ ${err?.stack || err}
     ffmpegInstance = ffmpeg;
     return ffmpeg;
 };
+
 /* =========================================================
    METADATA EXTRACTION (Native → FFmpeg fallback)
 ========================================================= */
@@ -146,12 +153,14 @@ Native failed → unsupported codec
 FFmpeg failed → ${e.message}
 
 Fix:
-- Check /public/ffmpeg files
+- Check internet (CDN)
 - Check headers
 - Check console logs
         `);
     }
 };
+
+
 
 /* =========================================================
    NATIVE EXTRACTION
