@@ -3,6 +3,7 @@ import { FaGoogle } from "react-icons/fa";
 import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "../components/ThemeContext";
 import styles from "./LoginPage.module.css"; // Correct import for CSS Module
+import logo from '../assets/logo-removebg.png';
 
 const LoginPage = () => {
   const [authMode, setAuthMode] = useState("login");
@@ -45,7 +46,7 @@ const LoginPage = () => {
       <div className={styles.illustrationSide}>
       
         <img
-          src="/src/assets/logo-removebg.png"
+          src={logo}
           alt="HexLabel Logo"
           className={styles.logo}
         />
