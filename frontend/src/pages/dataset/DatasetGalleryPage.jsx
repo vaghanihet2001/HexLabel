@@ -51,9 +51,7 @@ export default function DatasetGalleryPage({ datasetId }) {
         if (!ds) return;
 
         const jobs = await db.jobs.where({ datasetId, status: "completed" }).toArray();
-        const jobIds = jobs.map((j) => j.id);
-
-        const imgs = await db.images.where("jobId").anyOf(jobIds).toArray();
+        const imgs = await db.images.where("datasetId").equals(datasetId).toArray();
 
         const resolved = [];
         for (const img of imgs) {

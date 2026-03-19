@@ -111,7 +111,7 @@ async function rebuildImages(datasetFolder, datasetId) {
       const file = await entry.getFile();
 
       await db.images.put({
-        id: entry.name.split(".")[0], // jobId format = UUID.ext → extract base
+        id: entry.name.includes(".") ? entry.name.substring(0, entry.name.lastIndexOf('.')) : entry.name, // Extract base safely
         datasetId,
         name: entry.name,
         originalName: file.name,

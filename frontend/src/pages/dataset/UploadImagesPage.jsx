@@ -56,12 +56,12 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
 
     for (let i = 0; i < blobs.length; i++) {
       const blob = blobs[i];
-      const id = crypto.randomUUID();
       const url = URL.createObjectURL(blob);
 
       // Pad frame number
       const frameNum = String(i + 1).padStart(5, '0');
-      const name = `${baseName}_frame_${frameNum}.jpg`;
+      const id = `${baseName}_frame_${frameNum}`;
+      const name = `${id}.jpg`;
 
       const img = {
         id,
