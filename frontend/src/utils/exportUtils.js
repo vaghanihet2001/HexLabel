@@ -102,10 +102,10 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
     await processImages(ctx, (img, anns, width, height) => {
         const lines = [];
         for (const a of anns) {
-            if (a.type === "bbox") {
-                const clsIdx = ctx.classToIndex.get(a.className);
-                if (clsIdx === undefined) continue;
+            const clsIdx = ctx.classToIndex.get(a.className);
+            if (clsIdx === undefined) continue;
 
+            if (a.type === "bbox") {
                 // a.points is normalized [x1, y1, x2, y2]
                 // YOLO: class xc yc w h (normalized)
                 const [x1, y1, x2, y2] = a.points;
@@ -113,7 +113,22 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
                 const h = Math.abs(y2 - y1);
                 const xc = (x1 + x2) / 2;
                 const yc = (y1 + y2) / 2;
-
+                lines.push(`${clsIdx} ${xc.toFixed(6)} ${yc.toFixed(6)} ${w.toFixed(6)} ${h.toFixed(6)}`);
+            } else if (a.type === "poly" && a.points.length >= 6) {
+                // Convert polygon to tight bounding box
+                let minX = 1.0, maxX = 0.0, minY = 1.0, maxY = 0.0;
+                for (let i = 0; i < a.points.length; i += 2) {
+                    const x = a.points[i];
+                    const y = a.points[i + 1];
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+                const w = Math.abs(maxX - minX);
+                const h = Math.abs(maxY - minY);
+                const xc = (minX + maxX) / 2;
+                const yc = (minY + maxY) / 2;
                 lines.push(`${clsIdx} ${xc.toFixed(6)} ${yc.toFixed(6)} ${w.toFixed(6)} ${h.toFixed(6)}`);
             }
         }
@@ -140,12 +155,22 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
     await processImages(ctx, (img, anns, width, height) => {
         const lines = [];
         for (const a of anns) {
-            if (a.type === "polygon") {
-                const clsIdx = ctx.classToIndex.get(a.className);
-                if (clsIdx === undefined) continue;
+            const clsIdx = ctx.classToIndex.get(a.className);
+            if (clsIdx === undefined) continue;
 
+            if (a.type === "poly") {
                 // a.points is flattened [x1, y1, x2, y2, ...] normalized
                 const points = a.points.map(p => p.toFixed(6)).join(" ");
+                lines.push(`${clsIdx} ${points}`);
+            } else if (a.type === "bbox" && a.points.length === 4) {
+                // Convert BBox [x1, y1, x2, y2] to Polygon [x1,y1, x2,y1, x2,y2, x1,y2]
+                const x1 = Math.min(a.points[0], a.points[2]);
+                const x2 = Math.max(a.points[0], a.points[2]);
+                const y1 = Math.min(a.points[1], a.points[3]);
+                const y2 = Math.max(a.points[1], a.points[3]);
+                
+                const pts = [x1, y1, x2, y1, x2, y2, x1, y2];
+                const points = pts.map(p => p.toFixed(6)).join(" ");
                 lines.push(`${clsIdx} ${points}`);
             }
         }

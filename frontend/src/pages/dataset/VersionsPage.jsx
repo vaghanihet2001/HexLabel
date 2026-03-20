@@ -31,8 +31,6 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [split, setSplit] = useState({ train: 80, val: 10, test: 10 });
-  const [preproc, setPreproc] = useState({ grayscale: false, crop: false, resize: "" });
-  const [aug, setAug] = useState({ flipH: false, flipV: false, rotate: "", blur: false, noise: false });
 
   useEffect(() => {
     (async () => {
@@ -65,6 +63,10 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
 
       const vs = await db.datasetVersions.where("datasetId").equals(datasetId).toArray();
       setVersions(vs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+
+      if (ds?.type === "segment") setExportFormat("yolo-segment");
+      else if (ds?.type === "detect") setExportFormat("yolo-hbb");
+
     })();
   }, [datasetId]);
 
@@ -93,7 +95,7 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
 
     const ver = {
       id, datasetId, name, description,
-      splits: { ...split }, preprocessing: preproc, augmentation: aug,
+      splits: { ...split }, preprocessing: {}, augmentation: {},
       createdAt: new Date().toISOString(),
     };
 
@@ -252,10 +254,6 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
                       <div style={{ color: themeColors.subtleText }}>Val: {ver.splits.val}%</div>
                       <div style={{ color: themeColors.subtleText }}>Test: {ver.splits.test}%</div>
                     </div>
-                    <div>
-                      <strong>Preprocessing</strong>
-                      <div style={{ color: themeColors.subtleText }}>{Object.keys(ver.preprocessing || {}).length ? JSON.stringify(ver.preprocessing) : '—'}</div>
-                    </div>
                   </div>
                 </div>
               );
@@ -265,9 +263,9 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
           {mode === "create" && (
             <div>
               <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                {[1, 2, 3, 4, 5].map(n => (
+                {[1, 2, 3].map(n => (
                   <div key={n} onClick={() => setStep(n)} style={{ padding: 8, borderRadius: 8, cursor: 'pointer', background: step === n ? themeColors.primary : themeColors.cardBg, color: step === n ? '#fff' : themeColors.text, border: `1px solid ${themeColors.border}` }}>
-                    {step > n ? <CheckCircle2 size={14} /> : <Settings size={14} />} <small style={{ marginLeft: 6 }}>{['Info', 'Split', 'Preprocess', 'Augment', 'Finish'][n - 1]}</small>
+                    {step > n ? <CheckCircle2 size={14} /> : <Settings size={14} />} <small style={{ marginLeft: 6 }}>{['Info', 'Split', 'Finish'][n - 1]}</small>
                   </div>
                 ))}
               </div>
@@ -310,45 +308,10 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
               )}
 
               {step === 3 && (
-                <div>
-                  <Form.Group>
-                    <Form.Check type="checkbox" label="Grayscale" checked={preproc.grayscale} onChange={e => setPreproc({ ...preproc, grayscale: e.target.checked })} />
-                    <Form.Check type="checkbox" label="Crop annotated object" checked={preproc.crop} onChange={e => setPreproc({ ...preproc, crop: e.target.checked })} />
-                    <Form.Group style={{ marginTop: 8 }}>
-                      <Form.Label>Resize (WxH)</Form.Label>
-                      <Form.Control value={preproc.resize} onChange={e => setPreproc({ ...preproc, resize: e.target.value })} />
-                    </Form.Group>
-                  </Form.Group>
-                  <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between' }}>
-                    <Button variant="secondary" onClick={() => setStep(2)}>Back</Button>
-                    <Button onClick={() => setStep(4)}>Next</Button>
-                  </div>
-                </div>
-              )}
-
-              {step === 4 && (
-                <div>
-                  <Form.Check type="checkbox" label="Flip Horizontal" checked={aug.flipH} onChange={e => setAug({ ...aug, flipH: e.target.checked })} />
-                  <Form.Check type="checkbox" label="Flip Vertical" checked={aug.flipV} onChange={e => setAug({ ...aug, flipV: e.target.checked })} />
-                  <Form.Group style={{ marginTop: 8 }}>
-                    <Form.Label>Rotation range</Form.Label>
-                    <Form.Control value={aug.rotate} onChange={e => setAug({ ...aug, rotate: e.target.value })} />
-                  </Form.Group>
-                  <Form.Check type="checkbox" label="Blur" checked={aug.blur} onChange={e => setAug({ ...aug, blur: e.target.checked })} />
-                  <Form.Check type="checkbox" label="Add Noise" checked={aug.noise} onChange={e => setAug({ ...aug, noise: e.target.checked })} />
-
-                  <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between' }}>
-                    <Button variant="secondary" onClick={() => setStep(3)}>Back</Button>
-                    <Button onClick={() => setStep(5)}>Next</Button>
-                  </div>
-                </div>
-              )}
-
-              {step === 5 && (
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ marginBottom: 12 }}>Ready to create version with these settings.</div>
                   <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-                    <Button variant="secondary" onClick={() => setStep(4)}>Back</Button>
+                    <Button variant="secondary" onClick={() => setStep(2)}>Back</Button>
                     <Button onClick={createVersion}>Create Version</Button>
                   </div>
                 </div>
@@ -361,37 +324,36 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
         {/* AppModal for Delete Confirmation */}
         <AppModal
           show={showDeleteModal}
-          onHide={() => setShowDeleteModal(false)}
+          onClose={() => setShowDeleteModal(false)}
           title="Delete Version?"
           confirmText="Delete"
-          confirmVariant="danger"
+          type="confirm"
           onConfirm={confirmDelete}
-        >
-          <p>Are you sure you want to delete this version configuration? This action cannot be undone.</p>
-        </AppModal>
+          message={<p>Are you sure you want to delete this version configuration? This action cannot be undone.</p>}
+        />
 
-        {/* Export Modal */}
         <AppModal
           show={showExportModal}
-          onHide={() => setShowExportModal(false)}
+          onClose={() => setShowExportModal(false)}
           title="Export Dataset"
           confirmText={exporting ? "Exporting..." : "Export"}
-          confirmVariant="success"
+          type="confirm"
           onConfirm={handleExportConfirm}
-          disabled={exporting}
-        >
-          <Form.Group>
-            <Form.Label>Select Format</Form.Label>
-            <Form.Select value={exportFormat} onChange={e => setExportFormat(e.target.value)}>
-              {EXPORT_FORMATS.map(fmt => (
-                <option key={fmt.value} value={fmt.value}>{fmt.label}</option>
-              ))}
-            </Form.Select>
-            <Form.Text className="text-muted">
-              {EXPORT_FORMATS.find(f => f.value === exportFormat)?.description}
-            </Form.Text>
-          </Form.Group>
-        </AppModal>
+          loading={exporting}
+          message={
+            <Form.Group>
+              <Form.Label>Select Format</Form.Label>
+              <Form.Select value={exportFormat} onChange={e => setExportFormat(e.target.value)}>
+                {EXPORT_FORMATS.map(fmt => (
+                  <option key={fmt.value} value={fmt.value}>{fmt.label}</option>
+                ))}
+              </Form.Select>
+              <Form.Text className="text-muted" style={{ display: 'block', marginTop: 8 }}>
+                {EXPORT_FORMATS.find(f => f.value === exportFormat)?.description}
+              </Form.Text>
+            </Form.Group>
+          }
+        />
       </div>
 
       {/* Right: versions list (fixed right sidebar) */}

@@ -63,29 +63,76 @@ export const getVideoMetadata = async (file) => {
 const getMetadataNative = (file) => {
     return new Promise((resolve, reject) => {
         const video = document.createElement('video');
-        video.preload = 'metadata';
+        video.preload = 'auto';
         video.src = URL.createObjectURL(file);
 
-        video.onloadedmetadata = () => {
-            resolve({
-                duration: video.duration,
-                fps: 30,
-                width: video.videoWidth,
-                height: video.videoHeight,
-            });
+        let isResolved = false;
 
-            URL.revokeObjectURL(video.src);
+        const cleanup = () => {
+            if (video.src) URL.revokeObjectURL(video.src);
+            video.removeAttribute('src');
+            video.remove();
         };
 
-        video.onerror = () => reject(new Error("Metadata load failed"));
+        // If the browser can parse the container (like .mp4) but cannot play the codec (like mpeg4),
+        // it may stall indefinitely when asked to decode a frame. 
+        const timeoutId = setTimeout(() => {
+            if (!isResolved) {
+                isResolved = true;
+                cleanup();
+                reject(new Error("Native decoding timeout (codec likely unsupported)"));
+            }
+        }, 1500);
+
+        video.onloadedmetadata = () => {
+            // Force a small seek to authentically test the browser's video decoder
+            video.currentTime = Math.min(0.5, video.duration / 2 || 0);
+        };
+
+        video.onseeked = () => {
+            if (!isResolved) {
+                isResolved = true;
+                clearTimeout(timeoutId);
+
+                // If dimensions are 0 after seeking, it's just an audio track or dead video decoder
+                if (video.videoWidth === 0) {
+                    cleanup();
+                    return reject(new Error("No valid video track found natively"));
+                }
+
+                resolve({
+                    duration: video.duration,
+                    fps: 30, // Default fallback
+                    width: video.videoWidth,
+                    height: video.videoHeight,
+                    isSupported: true,
+                    codec: "native",
+                    container: file.name.split('.').pop() || "unknown",
+                });
+                cleanup();
+            }
+        };
+
+        video.onerror = () => {
+            if (!isResolved) {
+                isResolved = true;
+                clearTimeout(timeoutId);
+                cleanup();
+                reject(new Error("Native metadata load failed"));
+            }
+        };
     });
 };
 
 const getMetadataWithFFmpeg = async (file) => {
     const ffmpeg = await loadFFmpeg();
-    const fileName = 'meta_input';
-
-    await ffmpeg.writeFile(fileName, await fetchFile(file));
+    
+    const workDir = '/work_meta';
+    try { await ffmpeg.createDir(workDir); } catch(e) {} // ignore if exists
+    
+    // Instead of copying the massive file into RAM, mount it directly via WORKERFS
+    await ffmpeg.mount('WORKERFS', { files: [file] }, workDir);
+    const inputPath = `${workDir}/${file.name}`;
 
     let logs = "";
     const logHandler = ({ message }) => logs += message + "\n";
@@ -93,11 +140,13 @@ const getMetadataWithFFmpeg = async (file) => {
     ffmpeg.on('log', logHandler);
 
     try {
-        await ffmpeg.exec(['-i', fileName]);
+        await ffmpeg.exec(['-i', inputPath]);
     } catch {}
 
     ffmpeg.off('log', logHandler);
-    await ffmpeg.deleteFile(fileName);
+    
+    // Unmount file reference to clean up
+    await ffmpeg.unmount(workDir);
 
     const durationMatch = logs.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)/);
 
@@ -111,11 +160,24 @@ const getMetadataWithFFmpeg = async (file) => {
 
     const streamMatch = logs.match(/Video:.*?, (\d+)x(\d+).*?, (\d+(?:\.\d+)?) fps/);
 
+    const codecMatch = logs.match(/Stream #0:.*?: Video: ([a-zA-Z0-9_-]+)/);
+    const containerMatch = logs.match(/Input #0, ([a-zA-Z0-9_,]+),/);
+
+    const codec = codecMatch ? codecMatch[1].toLowerCase() : "unknown";
+    const container = containerMatch ? containerMatch[1].split(',')[0].toLowerCase() : "unknown";
+
+    // Only these modern codecs are successfully decoded by @ffmpeg/core WebAssembly build.
+    const supportedCodecs = ['h264', 'hevc', 'vp8', 'vp9', 'av1', 'theora'];
+    const isSupported = supportedCodecs.includes(codec);
+
     return {
         duration,
         width: streamMatch ? parseInt(streamMatch[1]) : 0,
         height: streamMatch ? parseInt(streamMatch[2]) : 0,
         fps: streamMatch ? parseFloat(streamMatch[3]) : 30,
+        codec,
+        container,
+        isSupported
     };
 };
 
@@ -234,12 +296,23 @@ const extractFramesNative = async (file, fps, onProgress) => {
 ========================================================= */
 const extractFramesFFmpeg = async (file, fps, onProgress) => {
     const ffmpeg = await loadFFmpeg();
-    const input = 'input_video';
+    const threshold = 500 * 1024 * 1024; // 500 MB limit for fast memory decoding
+    let inputPath = '';
+    const workDir = '/work_extract';
 
-    await ffmpeg.writeFile(input, await fetchFile(file));
+    if (file.size < threshold) {
+        // High-speed RAM extraction (MEMFS)
+        inputPath = 'input_video_' + file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+        await ffmpeg.writeFile(inputPath, await fetchFile(file));
+    } else {
+        // Safe massive-file extraction (WORKERFS)
+        try { await ffmpeg.createDir(workDir); } catch(e) {}
+        await ffmpeg.mount('WORKERFS', { files: [file] }, workDir);
+        inputPath = `${workDir}/${file.name}`;
+    }
 
     await ffmpeg.exec([
-        '-i', input,
+        '-i', inputPath,
         '-vf', `fps=${fps}`,
         'frame_%05d.jpg'
     ]);
@@ -264,7 +337,11 @@ const extractFramesFFmpeg = async (file, fps, onProgress) => {
         }
     }
 
-    await ffmpeg.deleteFile(input);
+    if (file.size < threshold) {
+        await ffmpeg.deleteFile(inputPath);
+    } else {
+        await ffmpeg.unmount(workDir);
+    }
 
     return blobs;
 };

@@ -52,7 +52,13 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
   const handleVideoExtractComplete = async (blobs, videoName) => {
     // Convert blobs to image objects
     const newImgs = [];
-    const baseName = videoName.substring(0, videoName.lastIndexOf('.')) || videoName;
+    
+    // Safely parse name and strip illegal File System characters
+    const safeName = videoName.substring(0, videoName.lastIndexOf('.')) || videoName;
+    const baseName = safeName.replace(/[^a-zA-Z0-9.\-]/g, '_');
+
+    // Append a short UUID to the frame so re-extracting the same video doesn't crash the database
+    const runId = crypto.randomUUID().split('-')[0];
 
     for (let i = 0; i < blobs.length; i++) {
       const blob = blobs[i];
@@ -60,14 +66,16 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
 
       // Pad frame number
       const frameNum = String(i + 1).padStart(5, '0');
-      const id = `${baseName}_frame_${frameNum}`;
-      const name = `${id}.jpg`;
+      
+      const uniqueId = crypto.randomUUID();
+      const name = `${baseName}_frame_${frameNum}_${runId}.jpg`;
+      const originalName = `${baseName}_frame_${frameNum}.jpg`;
 
       const img = {
-        id,
+        id: uniqueId,
         datasetId,
-        name,
-        originalName: name,
+        name: name,
+        originalName: originalName,
         blob,
         url,
         createdAt: new Date().toISOString(),

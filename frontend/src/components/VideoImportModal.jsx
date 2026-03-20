@@ -48,7 +48,7 @@ export default function VideoImportModal({ show, onHide, file, onExtractComplete
 
         try {
             const blobs = await extractFrames(file, extractRate, metadata.duration, (pct) => {
-                setProgress(pct);
+                setProgress(Math.round(pct));
             });
             onExtractComplete(blobs, file.name);
             onHide();
@@ -79,6 +79,11 @@ export default function VideoImportModal({ show, onHide, file, onExtractComplete
 
                 {metadata && (
                     <div>
+                        {!metadata.isSupported && (
+                            <div className="alert alert-warning mb-4 shadow-sm border-warning">
+                                <strong>⚠️ Unsupported Format Detected:</strong> This video uses the <strong className="text-danger">{metadata.codec.toUpperCase()}</strong> codec and <strong className="text-danger">{metadata.container.toUpperCase()}</strong> container, which are not supported for extraction in this browser app. Please convert your video to the <strong>H.264 (.mp4)</strong> format.
+                            </div>
+                        )}
                         <Row className="mb-4">
                             <Col md={6}>
                                 <div style={{ fontWeight: 'bold' }}>Video Name</div>
@@ -135,7 +140,7 @@ export default function VideoImportModal({ show, onHide, file, onExtractComplete
                 <Button variant="secondary" onClick={onHide} disabled={loading}>
                     Cancel
                 </Button>
-                <Button variant="primary" onClick={handleExtract} disabled={loading || !metadata}>
+                <Button variant="primary" onClick={handleExtract} disabled={loading || !metadata || !metadata.isSupported}>
                     {loading ? "Extracting..." : "Extract Frames"}
                 </Button>
             </Modal.Footer>
