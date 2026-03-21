@@ -1821,8 +1821,7 @@ export default function Annotate() {
                         alt={img.name}
                         style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
                         onError={(e) => {
-                          e.currentTarget.src = "";
-                          console.warn("Thumbnail failed:", img.url);
+                          console.warn("Thumbnail failed to load in sidebar:", img.url);
                         }}
                       />
                     ) : (
@@ -1867,8 +1866,7 @@ export default function Annotate() {
                     userSelect: "none",
                   }}
                   onError={(e) => {
-                    e.currentTarget.src = "";
-                    console.warn("Full image load failed:", currentImage.url);
+                    console.warn(`Full image load failed in Annotate view for image: ${currentImage.name} (URL: ${currentImage.url})`);
                   }}
                   draggable={false}
                 />

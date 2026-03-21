@@ -328,7 +328,7 @@ const extractFramesFFmpeg = async (file, fps, onProgress) => {
     for (let i = 0; i < frames.length; i++) {
         const data = await ffmpeg.readFile(frames[i].name);
 
-        blobs.push(new Blob([data.buffer], { type: 'image/jpeg' }));
+        blobs.push(new Blob([data], { type: 'image/jpeg' }));
 
         await ffmpeg.deleteFile(frames[i].name);
 
