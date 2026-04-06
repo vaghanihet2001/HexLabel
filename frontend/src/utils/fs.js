@@ -22,10 +22,11 @@ export async function createDatasetFolderStructure(projectFolderHandle, datasetM
   // create dataset root
   const datasetHandle = await projectFolderHandle.getDirectoryHandle(datasetMeta.name, { create: true });
 
-  // create images/raw and images/thumbs
+  // create images/raw, images/thumbs, images/meta
   const imagesHandle = await datasetHandle.getDirectoryHandle("images", { create: true });
   const rawHandle = await imagesHandle.getDirectoryHandle("raw", { create: true });
   const thumbsHandle = await imagesHandle.getDirectoryHandle("thumbs", { create: true });
+  await imagesHandle.getDirectoryHandle("meta", { create: true });
 
   // create annotations and jobs folders
   await datasetHandle.getDirectoryHandle("annotations", { create: true });
@@ -303,4 +304,341 @@ export async function scanVersionsFromDatasetFolder(datasetHandle) {
     // versions folder might not exist
   }
   return versions;
+}
+// Write per-image metadata to images/meta/<imageId>.json
+export async function writeImageMeta(datasetHandle, imageMeta) {
+  if (!datasetHandle) return;
+  try {
+    const imagesFolder = await datasetHandle.getDirectoryHandle("images", { create: true });
+    const metaFolder = await imagesFolder.getDirectoryHandle("meta", { create: true });
+    const fh = await metaFolder.getFileHandle(`${imageMeta.id}.json`, { create: true });
+    const w = await fh.createWritable();
+    await w.write(JSON.stringify(imageMeta, null, 2));
+    await w.close();
+  } catch (err) {
+    console.warn("writeImageMeta failed:", err);
+  }
+}
+
+// Read per-image metadata from images/meta/<imageId>.json
+export async function readImageMeta(datasetHandle, imageId) {
+  if (!datasetHandle) return null;
+  try {
+    const imagesFolder = await datasetHandle.getDirectoryHandle("images");
+    const metaFolder = await imagesFolder.getDirectoryHandle("meta");
+    const fh = await metaFolder.getFileHandle(`${imageId}.json`);
+    const file = await fh.getFile();
+    return JSON.parse(await file.text());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * scanImageMetaFromDataset
+ * Scans images/meta/ and returns all image metadata objects.
+ * Used to rebuild IndexedDB if it was cleared.
+ */
+export async function scanImageMetaFromDataset(datasetHandle) {
+  const results = [];
+  try {
+    const imagesFolder = await datasetHandle.getDirectoryHandle("images");
+    const metaFolder = await imagesFolder.getDirectoryHandle("meta");
+    for await (const entry of metaFolder.values()) {
+      if (entry.kind !== "file" || !entry.name.endsWith(".json")) continue;
+      try {
+        const file = await entry.getFile();
+        const meta = JSON.parse(await file.text());
+        if (meta?.id) results.push(meta);
+      } catch { /* skip corrupt files */ }
+    }
+  } catch { /* meta folder doesn't exist yet */ }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// CLASS DICTIONARY
+// ---------------------------------------------------------------------------
+
+/** Read classes array from dataset.json */
+export async function readDatasetClasses(datasetHandle) {
+  const meta = await readDatasetMetadata(datasetHandle);
+  return meta?.classes ?? [];
+}
+
+/** Write (replace) classes array in dataset.json */
+export async function writeDatasetClasses(datasetHandle, classes) {
+  const meta = (await readDatasetMetadata(datasetHandle)) || {};
+  meta.classes = classes;
+  await writeDatasetMetadata(datasetHandle, meta);
+}
+
+/** Add a single class to dataset.json if it doesn't exist already */
+export async function addDatasetClass(datasetHandle, cls) {
+  const classes = await readDatasetClasses(datasetHandle);
+  const exists = classes.find(c => c.id === cls.id || c.name === cls.name);
+  if (exists) return exists;
+  classes.push(cls);
+  await writeDatasetClasses(datasetHandle, classes);
+  return cls;
+}
+
+/**
+ * Rewrite all active annotation files: replace every occurrence of fromClassId
+ * with toClassId. Used for Merge.
+ * Returns count of files updated.
+ */
+export async function mergeClassInAnnotations(datasetHandle, fromClassId, toClassId, onProgress) {
+  let updated = 0;
+  try {
+    const annotationsDir = await datasetHandle.getDirectoryHandle("annotations");
+    const activeDir = await annotationsDir.getDirectoryHandle("active");
+    const files = [];
+    for await (const entry of activeDir.values()) {
+      if (entry.kind === "file" && entry.name.endsWith(".json")) files.push(entry.name);
+    }
+    for (let i = 0; i < files.length; i++) {
+      const fname = files[i];
+      onProgress?.({ current: i + 1, total: files.length, file: fname });
+      try {
+        const fh = await activeDir.getFileHandle(fname);
+        const file = await fh.getFile();
+        const data = JSON.parse(await file.text());
+        let changed = false;
+        if (Array.isArray(data.annotations)) {
+          data.annotations = data.annotations.map(a => {
+            if (a.classId === fromClassId) { changed = true; return { ...a, classId: toClassId }; }
+            return a;
+          });
+        }
+        if (changed) {
+          const wfh = await activeDir.getFileHandle(fname, { create: true });
+          const w = await wfh.createWritable();
+          await w.write(JSON.stringify(data, null, 2));
+          await w.close();
+          updated++;
+        }
+      } catch { /* skip corrupt file */ }
+    }
+  } catch { /* no annotations/active folder */ }
+  return updated;
+}
+
+/**
+ * Delete all annotations with a given classId from all active annotation files.
+ * Used when a class is deleted.
+ * Returns count of files updated.
+ */
+export async function deleteClassFromAnnotations(datasetHandle, classId, onProgress) {
+  let updated = 0;
+  try {
+    const annotationsDir = await datasetHandle.getDirectoryHandle("annotations");
+    const activeDir = await annotationsDir.getDirectoryHandle("active");
+    const files = [];
+    for await (const entry of activeDir.values()) {
+      if (entry.kind === "file" && entry.name.endsWith(".json")) files.push(entry.name);
+    }
+    for (let i = 0; i < files.length; i++) {
+      const fname = files[i];
+      onProgress?.({ current: i + 1, total: files.length, file: fname });
+      try {
+        const fh = await activeDir.getFileHandle(fname);
+        const file = await fh.getFile();
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data.annotations)) continue;
+        const before = data.annotations.length;
+        data.annotations = data.annotations.filter(a => a.classId !== classId);
+        if (data.annotations.length !== before) {
+          const wfh = await activeDir.getFileHandle(fname, { create: true });
+          const w = await wfh.createWritable();
+          await w.write(JSON.stringify(data, null, 2));
+          await w.close();
+          updated++;
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* no annotations/active */ }
+  return updated;
+}
+
+// ---------------------------------------------------------------------------
+// TAG DICTIONARY
+// ---------------------------------------------------------------------------
+
+/** Read tags array from dataset.json */
+export async function readDatasetTags(datasetHandle) {
+  const meta = await readDatasetMetadata(datasetHandle);
+  return meta?.tags ?? [];
+}
+
+/** Write (replace) tags array in dataset.json */
+export async function writeDatasetTags(datasetHandle, tags) {
+  const meta = (await readDatasetMetadata(datasetHandle)) || {};
+  meta.tags = tags;
+  await writeDatasetMetadata(datasetHandle, meta);
+}
+
+/** Update tagIds on a single image's meta file */
+export async function updateImageMetaTags(datasetHandle, imageId, tagIds) {
+  const meta = await readImageMeta(datasetHandle, imageId);
+  if (!meta) return;
+  meta.tagIds = tagIds;
+  await writeImageMeta(datasetHandle, meta);
+}
+
+// ---------------------------------------------------------------------------
+// MIGRATION HELPERS
+// ---------------------------------------------------------------------------
+
+/**
+ * migrateAnnotationClasses
+ *
+ * Scans all annotations/active/<imageId>.json files.
+ * For each annotation with `className` but no `classId`:
+ *   - Finds or creates a class entry in dataset.json
+ *   - Rewrites the annotation with `classId`
+ * Removes `className` and `color` fields from annotations after migration.
+ *
+ * @param {FileSystemDirectoryHandle} datasetHandle
+ * @param {function} onProgress - callback({ current, total, file })
+ * @returns {{ classesCreated: string[], filesUpdated: number }}
+ */
+export async function migrateAnnotationClasses(datasetHandle, onProgress) {
+  const classes = await readDatasetClasses(datasetHandle);
+  const classMap = new Map(classes.map(c => [c.name.toLowerCase(), c]));
+  let filesUpdated = 0;
+  const createId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  const colorForLabel = (label) => {
+    let h = 0;
+    for (let i = 0; i < label.length; i++) h = (h << 5) - h + label.charCodeAt(i);
+    return `hsl(${Math.abs(h) % 360} 70% 50%)`;
+  };
+
+  try {
+    const annotationsDir = await datasetHandle.getDirectoryHandle("annotations");
+    const activeDir = await annotationsDir.getDirectoryHandle("active");
+    const files = [];
+    for await (const entry of activeDir.values()) {
+      if (entry.kind === "file" && entry.name.endsWith(".json")) files.push(entry.name);
+    }
+
+    for (let i = 0; i < files.length; i++) {
+      const fname = files[i];
+      onProgress?.({ current: i + 1, total: files.length, file: fname });
+      try {
+        const fh = await activeDir.getFileHandle(fname);
+        const file = await fh.getFile();
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data.annotations)) continue;
+
+        let changed = false;
+        data.annotations = data.annotations.map(a => {
+          // Already migrated
+          if (a.classId) return a;
+          // Has old className
+          if (a.className) {
+            const key = a.className.toLowerCase();
+            if (!classMap.has(key)) {
+              // Create new class entry
+              const newCls = { id: createId(), name: a.className, color: a.color || colorForLabel(a.className) };
+              classMap.set(key, newCls);
+              classes.push(newCls);
+            }
+            const cls = classMap.get(key);
+            changed = true;
+            // Remove old fields, add classId
+            const { className: _cn, color: _c, ...rest } = a;
+            return { ...rest, classId: cls.id };
+          }
+          return a;
+        });
+
+        if (changed) {
+          // Write updated annotation file
+          const wfh = await activeDir.getFileHandle(fname, { create: true });
+          const w = await wfh.createWritable();
+          await w.write(JSON.stringify(data, null, 2));
+          await w.close();
+          filesUpdated++;
+        }
+      } catch { /* skip corrupt */ }
+    }
+  } catch { /* no annotations/active */ }
+
+  // Write updated classes back to dataset.json
+  await writeDatasetClasses(datasetHandle, classes);
+  return { classesCreated: classes.map(c => c.name), filesUpdated };
+}
+
+/**
+ * migrateImageMeta
+ *
+ * Scans images/raw/ and creates images/meta/<id>.json for any image
+ * that doesn't already have a meta file.
+ * - If the filename is a UUID (new-style), uses it as the id.
+ * - If the filename is a readable name (old-style), uses the filename (without ext) as the id.
+ * - Tries to read existing data from `dbImages` array (IndexedDB records passed in).
+ *
+ * @param {FileSystemDirectoryHandle} datasetHandle
+ * @param {Array} dbImages - current db.images records for this dataset
+ * @param {string} datasetId
+ * @param {function} onProgress
+ * @returns {{ created: number }}
+ */
+export async function migrateImageMeta(datasetHandle, dbImages, datasetId, onProgress) {
+  const dbMap = new Map(dbImages.map(img => [img.name, img]));
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let created = 0;
+
+  try {
+    const imagesDir = await datasetHandle.getDirectoryHandle("images");
+    const rawDir = await imagesDir.getDirectoryHandle("raw");
+    const metaDir = await imagesDir.getDirectoryHandle("meta", { create: true });
+
+    const files = [];
+    for await (const entry of rawDir.values()) {
+      if (entry.kind === "file") files.push(entry.name);
+    }
+
+    for (let i = 0; i < files.length; i++) {
+      const fname = files[i];
+      onProgress?.({ current: i + 1, total: files.length, file: fname });
+
+      // Check if meta file already exists
+      const ext = fname.includes(".") ? fname.slice(fname.lastIndexOf(".")) : "";
+      const nameWithoutExt = fname.slice(0, fname.length - ext.length);
+
+      try {
+        // Already has meta file — skip
+        await metaDir.getFileHandle(`${nameWithoutExt}.json`);
+        continue;
+      } catch { /* no meta file — create it */ }
+
+      // Determine id: if filename is UUID, use it; otherwise use filename without ext
+      const id = uuidRe.test(nameWithoutExt) ? nameWithoutExt : nameWithoutExt;
+
+      // Try to get data from DB
+      const dbRecord = dbMap.get(fname) || dbImages.find(img => img.id === id);
+
+      const imageMeta = {
+        id,
+        name: fname,
+        originalName: dbRecord?.originalName || fname,
+        datasetId,
+        jobId: dbRecord?.jobId ?? null,
+        tagIds: [],
+        createdAt: dbRecord?.createdAt || new Date().toISOString(),
+      };
+
+      const fh = await metaDir.getFileHandle(`${id}.json`, { create: true });
+      const w = await fh.createWritable();
+      await w.write(JSON.stringify(imageMeta, null, 2));
+      await w.close();
+      created++;
+    }
+  } catch (err) {
+    console.warn("migrateImageMeta error:", err);
+  }
+
+  return { created };
 }

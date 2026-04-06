@@ -50,7 +50,6 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
   // VIDEO MODAL HANDLERS
   // -----------------------------
   const handleVideoExtractComplete = async (blobs, videoName) => {
-    // Convert blobs to image objects
     const newImgs = [];
     
     // Safely parse name and strip illegal File System characters
@@ -64,18 +63,18 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
       const blob = blobs[i];
       const url = URL.createObjectURL(blob);
 
-      // Pad frame number
+      // UUID is the id AND the filename on disk — ensures no collisions
+      // even if same video is uploaded twice or at different FPS
+      const id = crypto.randomUUID();
       const frameNum = String(i + 1).padStart(5, '0');
-      
-      const uniqueId = crypto.randomUUID();
-      const name = `${baseName}_frame_${frameNum}_${runId}.jpg`;
-      const originalName = `${baseName}_frame_${frameNum}.jpg`;
+      const name = `${id}.jpg`;              // filename on disk: <uuid>.jpg
+      const originalName = `${baseName}_frame_${frameNum}.jpg`; // display name
 
       const img = {
-        id: uniqueId,
+        id,
         datasetId,
-        name: name,
-        originalName: originalName,
+        name,
+        originalName,
         blob,
         url,
         createdAt: new Date().toISOString(),
@@ -274,6 +273,9 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
 
       const imageIds = [];
 
+      // Get or create images/meta folder for per-image metadata
+      const metaFolder = await imagesFolder.getDirectoryHandle("meta", { create: true });
+
       // ---------- WRITE IMAGES TO FS ----------
       for (const id of selected) {
         const tempImg = await db.tempImages.get(id);
@@ -284,21 +286,28 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
           throw new Error(`${tempImg.originalName} already assigned to a job.`);
         }
 
+        // Write image file: always named <imageId>.<ext> on disk
         const fileHandle = await rawFolder.getFileHandle(tempImg.name, { create: true });
         const w = await fileHandle.createWritable();
         await w.write(await tempImg.blob.arrayBuffer());
         await w.close();
 
-        await db.images.put({
+        // Write per-image metadata file: images/meta/<imageId>.json
+        // This is the source of truth for recovery if IndexedDB is cleared.
+        const imageMeta = {
           id: tempImg.id,
+          name: tempImg.name,           // filename on disk: <uuid>.jpg
+          originalName: tempImg.originalName, // display name
           datasetId,
-          name: tempImg.name,
-          originalName: tempImg.originalName,
-          path: `images/raw/${tempImg.name}`,
-          createdAt: new Date().toISOString(),
           jobId: null,
-        });
+          createdAt: new Date().toISOString(),
+        };
+        const metaFh = await metaFolder.getFileHandle(`${tempImg.id}.json`, { create: true });
+        const mw = await metaFh.createWritable();
+        await mw.write(JSON.stringify(imageMeta, null, 2));
+        await mw.close();
 
+        await db.images.put({ ...imageMeta, jobId: null });
         imageIds.push(tempImg.id);
       }
 

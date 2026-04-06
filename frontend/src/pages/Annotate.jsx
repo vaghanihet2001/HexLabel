@@ -41,6 +41,10 @@ import {
   writeJobFile,
   readJobFile,
   deleteJobFile,
+  readImageMeta,
+  writeImageMeta,
+  readDatasetClasses,
+  addDatasetClass,
 } from "../utils/fs";
 
 /* ---------------------------
@@ -387,29 +391,170 @@ export default function Annotate() {
 
         // load images (job-specific or whole dataset)
         const jobImageIds = jb?.imageIds ?? [];
-        const imgs =
+        let imgs =
           jobImageIds.length > 0
             ? await db.images.where("id").anyOf(jobImageIds).toArray()
             : await db.images.where("datasetId").equals(dsId).toArray();
 
+        // CLEANUP: If the DB returned a stale blob: url (due to a previous bug), remove it
+        for (let i = 0; i < imgs.length; i++) {
+          if (imgs[i].url && typeof imgs[i].url === "string") {
+            delete imgs[i].url;
+            db.images.update(imgs[i].id, { url: undefined }).catch(() => {});
+          }
+        }
+
+        // Resolve dataset folder handle once
+        const dsFolder = ds.folderHandle || (proj?.folderHandle
+          ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null)
+          : null);
+
+        // -------------------------------------------------------
+        // RECOVERY: If DB records are missing (IndexedDB cleared),
+        // try three strategies in order — no scanning, no guessing.
+        //
+        // Tier 1: images/meta/<imageId>.json           (new jobs with meta files)
+        // Tier 2: images/raw/<imageId>.<ext>           (new UUID-named files without
+        //          meta yet, AND legacy readable-name files like frame_00001.jpg)
+        // Tier 3: job.imageNames map                   (jobs created in the brief
+        //          window between UUID change & meta file addition)
+        // -------------------------------------------------------
+        if (jobImageIds.length > 0 && imgs.length < jobImageIds.length && dsFolder) {
+          const foundIds = new Set(imgs.map(i => i.id));
+          const missingIds = jobImageIds.filter(id => !foundIds.has(id));
+          const imageNamesMap = jb?.imageNames ?? {}; // legacy fallback map
+
+          let imagesDir, rawDir;
+          try {
+            imagesDir = await dsFolder.getDirectoryHandle("images");
+            rawDir = await imagesDir.getDirectoryHandle("raw");
+          } catch { /* no images folder at all */ }
+
+          const tryOpenFile = async (filename) => {
+            if (!rawDir) return null;
+            try {
+              const fh = await rawDir.getFileHandle(filename);
+              const file = await fh.getFile();
+              const url = URL.createObjectURL(file);
+              createdUrlsRef.current.add(url);
+              return { file, url, filename };
+            } catch { return null; }
+          };
+
+          for (const missingId of missingIds) {
+            let recovered = null;
+
+            // --- Tier 0: fix 0 - read imageName from annotation file (unmigrated data) ---
+            if (!recovered) {
+              try {
+                const annFile = await readAnnotationFile(dsFolder, missingId, null);
+                if (annFile && annFile.imageName) {
+                  const opened = await tryOpenFile(annFile.imageName);
+                  if (opened) {
+                    recovered = {
+                      id: missingId,
+                      name: annFile.imageName,
+                      originalName: annFile.imageName,
+                      datasetId: dsId,
+                      jobId: jb?.id ?? null,
+                      tagIds: [],
+                      createdAt: new Date().toISOString(),
+                      url: opened.url,
+                    };
+                  }
+                }
+              } catch { /* no annotation file */ }
+            }
+
+
+            // --- Tier 1: meta file (new jobs) ---
+            if (!recovered) {
+              try {
+                const meta = await readImageMeta(dsFolder, missingId);
+                if (meta?.name) {
+                  const opened = await tryOpenFile(meta.name);
+                  if (opened) {
+                    recovered = { ...meta, datasetId: dsId, url: opened.url, _hasMeta: true };
+                  }
+                }
+              } catch { /* no meta file */ }
+            }
+
+            // --- Tier 2: id is the filename base (legacy readable OR new UUID) ---
+            if (!recovered) {
+              const exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"];
+              for (const ext of exts) {
+                const opened = await tryOpenFile(`${missingId}${ext}`);
+                if (opened) {
+                  recovered = {
+                    id: missingId,
+                    name: opened.filename,
+                    originalName: opened.filename,
+                    datasetId: dsId,
+                    jobId: jb?.id ?? null,
+                    tagIds: [],
+                    createdAt: new Date().toISOString(),
+                    url: opened.url,
+                  };
+                  break;
+                }
+              }
+            }
+
+            // --- Tier 3: job.imageNames map (transition-period jobs) ---
+            if (!recovered && imageNamesMap[missingId]) {
+              const knownName = imageNamesMap[missingId];
+              const opened = await tryOpenFile(knownName);
+              if (opened) {
+                recovered = {
+                  id: missingId,
+                  name: knownName,
+                  originalName: knownName,
+                  datasetId: dsId,
+                  jobId: jb?.id ?? null,
+                  tagIds: [],
+                  createdAt: new Date().toISOString(),
+                  url: opened.url,
+                };
+              }
+            }
+
+            if (recovered) {
+              // Re-register in DB so next load is instant
+              const { url: _u, _hasMeta: _h, ...dbPayload } = recovered;
+              await db.images.put(dbPayload);
+              // Write meta file if missing, so future recovery is Tier 1
+              if (!recovered._hasMeta) {
+                try {
+                  await (await import("../utils/fs")).writeImageMeta(dsFolder, dbPayload);
+                } catch { /* best effort */ }
+              }
+              imgs.push(recovered);
+            } else {
+              console.warn(`Recovery failed for image ${missingId} — file not found on disk`);
+            }
+          }
+        }
+
+
         const resolved = [];
         for (const img of imgs) {
+          // If recovery already attached a url, use it directly
+          if (img.url) {
+            resolved.push(img);
+            continue;
+          }
           let url = null;
           try {
-            const dsFolder = ds.folderHandle || (proj?.folderHandle ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null) : null);
-
             if (dsFolder) {
               try {
-                // images are stored under images/raw/<name>
                 const imagesDir = await dsFolder.getDirectoryHandle("images");
                 const rawDir = await imagesDir.getDirectoryHandle("raw");
                 const fh = await rawDir.getFileHandle(img.name);
                 const file = await fh.getFile();
                 url = URL.createObjectURL(file);
                 createdUrlsRef.current.add(url);
-              } catch (err) {
-                // fallback to stored blob / url
-              }
+              } catch { /* fallback to stored blob / url */ }
             }
             if (!url && img.file instanceof Blob) {
               url = URL.createObjectURL(img.file);
@@ -435,22 +580,23 @@ export default function Annotate() {
           setCurrentIdx(0);
         }
 
-        // derive classes from annotations in DB (all dataset annotations)
-        const allAnn = await db.annotations.where("datasetId").equals(dsId).toArray();
-        const labels = new Map();
-        for (const r of allAnn) {
-          const arr = r?.data ?? [];
-          for (const a of arr) {
-            const name = a.className || "class";
-            if (!labels.has(name)) labels.set(name, colorForLabel(name));
-          }
-        }
-
-        setClasses(Array.from(labels.entries()).map(([name, color]) => ({ id: uid(), name, color })));
+        // Load classes from dataset.json (the class dictionary — source of truth)
+        // This replaces the old approach of scanning all annotation files.
+        const dsMeta = await readDatasetMetadata(dsFolder);
+        const builtClasses = (dsMeta?.classes ?? []).map(c => ({
+          id: c.id,
+          name: c.name,
+          color: c.color,
+        }));
+        setClasses(builtClasses);
 
         // Set first class as default if none set
-        if (!defaultClassId && labels.size > 0) {
-          // logic to set default if needed, or leave null to pick first in list dynamically
+        if (!defaultClassId && builtClasses.length > 0) {
+          setDefaultClassId(builtClasses[0].id);
+          // Also update stateRef immediately so the canvas loop has the correct value
+          // before the next React render cycle flushes the useEffect sync.
+          stateRef.current.classes = builtClasses;
+          stateRef.current.defaultClassId = builtClasses[0].id;
         }
       } catch (err) {
         console.error("Load failed:", err);
@@ -474,9 +620,16 @@ export default function Annotate() {
      ANNOTATIONS REF + autosave wiring
   ----------------------------- */
   const annotationsRef = useRef(annotations);
+  // Guard: true while loadForImage is running — prevents autosave from firing
+  // with stale/empty annotations before the async load completes.
+  const isLoadingRef = useRef(false);
+
   useEffect(() => {
     annotationsRef.current = annotations;
-    scheduleSave();
+    // Only schedule a save for genuine user edits, not for loads
+    if (!isLoadingRef.current) {
+      scheduleSave();
+    }
   }, [annotations]);
 
   // load annotations for current image (DB preferred, fallback to FS active)
@@ -488,38 +641,68 @@ export default function Annotate() {
         return;
       }
 
+      // Cancel any pending autosave from the previous image before we start
+      // loading — this prevents a stale save racing against the new load.
+      if (autosaveTimer.current) {
+        clearTimeout(autosaveTimer.current);
+        autosaveTimer.current = null;
+      }
+
+      isLoadingRef.current = true;
+
       try {
-        // First try DB
-        const rec = await db.annotations
+        // First try DB (by imageId for reliability)
+        const recById = await db.annotations
           .where("datasetId")
           .equals(dsId)
-          .and((a) => a.imageName === img.name)
+          .and((a) => a.imageId === img.id && !a.versionId)
+          .first();
+
+        // Also try by imageName for backwards-compatibility
+        const rec = recById || await db.annotations
+          .where("datasetId")
+          .equals(dsId)
+          .and((a) => a.imageName === img.name && !a.versionId)
           .first();
 
         let data = rec?.data ?? null;
 
-        // If DB empty, try reading FS active annotation file (by image id)
-        if (!data) {
+        // If DB empty or data is empty, try reading FS active annotation file (by image id)
+        if (!data || data.length === 0) {
           try {
             const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
             if (dsFolder) {
               const fileObj = await readAnnotationFile(dsFolder, img.id, null);
-              if (fileObj?.annotations) data = fileObj.annotations;
+              if (fileObj?.annotations?.length > 0) data = fileObj.annotations;
             }
           } catch (err) {
             // ignore
           }
         }
 
-        // normalize annotations, add visible flag
-        const normalized = (data || []).map((a, index) => ({
-          id: a.id || index.toString(),
-          type: a.type,
-          points: a.points,
-          className: a.className || "class",
-          color: a.color || colorForLabel(a.className || "class"),
-          visible: a.visible !== false,
-        }));
+        // normalize annotations: support both old (className) and new (classId) format
+        const normalized = (data || []).map((a, index) => {
+          // New format: has classId
+          if (a.classId) {
+            return {
+              id: a.id || index.toString(),
+              type: a.type,
+              points: a.points,
+              classId: a.classId,
+              visible: a.visible !== false,
+            };
+          }
+          // Old format: has className (pre-migration) — keep for display, mark unclassified
+          return {
+            id: a.id || index.toString(),
+            type: a.type,
+            points: a.points,
+            classId: null,          // will show as "Unclassified" until migrated
+            _legacyClassName: a.className || "class",
+            _legacyColor: a.color || colorForLabel(a.className || "class"),
+            visible: a.visible !== false,
+          };
+        });
 
         setAnnotations(normalized);
         setSelectedAnnId(null);
@@ -530,6 +713,10 @@ export default function Annotate() {
       } catch (e) {
         console.warn("Failed to load annotations:", e);
         setAnnotations([]);
+      } finally {
+        // Allow autosave again after load settles
+        // Small delay so React can flush setAnnotations before the guard is released
+        setTimeout(() => { isLoadingRef.current = false; }, 100);
       }
     };
 
@@ -574,7 +761,15 @@ export default function Annotate() {
           imageId: img.id,
           imageName: img.name,
           datasetId: dsId,
-          annotations: currentAnnotations,
+          // Save annotations with classId (new format)
+          // Legacy className/color fields are dropped on save
+          annotations: currentAnnotations.map(a => ({
+            id: a.id,
+            type: a.type,
+            points: a.points,
+            classId: a.classId ?? null,
+            visible: a.visible,
+          })),
           updatedAt: new Date().toISOString(),
           versionId: null,
         };
@@ -595,16 +790,19 @@ export default function Annotate() {
 
   useEffect(() => {
     if (images.length === 0) return;
-    scheduleSave();
 
     return () => {
+      // When image changes or component unmounts, flush any pending save immediately
       if (autosaveTimer.current) {
         clearTimeout(autosaveTimer.current);
-        // Force immediate save for the image we are leaving
-        saveImageAnnotations(images[currentIdx], annotationsRef.current);
+        autosaveTimer.current = null;
+        // Only save if not in the middle of a load
+        if (!isLoadingRef.current) {
+          saveImageAnnotations(images[currentIdx], annotationsRef.current);
+        }
       }
     };
-  }, [currentIdx, images, scheduleSave, saveImageAnnotations]);
+  }, [currentIdx, images, saveImageAnnotations]);
 
   /* -----------------------------
      Canvas drawing, rendering & interactions
@@ -665,7 +863,9 @@ export default function Annotate() {
       // draw existing annotations
       for (const a of annotations) {
         if (a.visible === false) continue;
-        const stroke = a.color || colorForLabel(a.className || "class");
+        // Resolve class color: look up by classId in the classes dict
+        const cls = stateRef.current.classes.find(c => c.id === a.classId);
+        const stroke = cls?.color || a._legacyColor || "#888";
         ctx.strokeStyle = stroke;
         ctx.lineWidth = a.id === selectedAnnId ? 3 : 2;
         ctx.fillStyle = "rgba(255,255,255,0.30)";
@@ -1218,8 +1418,7 @@ export default function Annotate() {
                   id: uid(),
                   type: "bbox",
                   points: bbox,
-                  className: defClass?.name ?? "class",
-                  color: defClass?.color ?? colorForLabel(defClass?.name ?? "class"),
+                  classId: defClass?.id ?? null,
                   visible: true,
                 };
                 setAnnotations((p) => [...p, ann]);
@@ -1258,8 +1457,7 @@ export default function Annotate() {
             id: uid(),
             type: "poly",
             points: pts,
-            className: defClass?.name ?? "class",
-            color: defClass?.color ?? colorForLabel(defClass?.name ?? "class"),
+            classId: defClass?.id ?? null,
             visible: true,
           };
           setAnnotations((p) => [...p, ann]);
@@ -1439,22 +1637,32 @@ export default function Annotate() {
     }
     const c = { id: uid(), name, color: colorForLabel(name) };
     setClasses((p) => [c, ...p]);
+    // Sync stateRef immediately
+    stateRef.current.classes = [c, ...classes];
+    setDefaultClassId((prev) => prev ?? c.id);
+    stateRef.current.defaultClassId = stateRef.current.defaultClassId ?? c.id;
     setNewClassName("");
 
-    // Auto-assign this new class to any annotations that have the default "class" label
+    // Persist to dataset.json (Option A: always write new classes permanently)
+    try {
+      const dsFolder = dataset?.folderHandle ||
+        (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
+      if (dsFolder) await addDatasetClass(dsFolder, c);
+    } catch (e) {
+      console.warn("Failed to persist new class to dataset.json:", e);
+    }
+
+    // Auto-assign to any unclassified annotations
     setAnnotations((prev) =>
       prev.map((a) => {
-        if (!a.className || a.className === "class") {
-          return { ...a, className: name, color: c.color };
-        }
+        if (!a.classId) return { ...a, classId: c.id };
         return a;
       })
     );
   };
 
-  const updateAnnotationClass = (annId, className) => {
-    const color = colorForLabel(className);
-    updateAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, className, color } : a)));
+  const updateAnnotationClass = (annId, classId) => {
+    updateAnnotations((p) => p.map((a) => (a.id === annId ? { ...a, classId } : a)));
   };
 
   const deleteAnnotation = (annId) => updateAnnotations((p) => p.filter((a) => a.id !== annId));
@@ -1479,14 +1687,12 @@ export default function Annotate() {
   };
 
   const handleNextImage = () => {
-    // Validation: Check for unlabelled annotations
-    const unlabelled = annotations.some(
-      (a) => !a.className || a.className === "class"
-    );
+    // Validation: Check for unclassified annotations
+    const unlabelled = annotations.some((a) => !a.classId);
     if (unlabelled) {
       openModal({
         type: "error",
-        title: "Unlabelled Annotations",
+        title: "Unclassified Annotations",
         message: "Please assign a class to all annotations before moving to the next image.",
       });
       return;
@@ -2034,15 +2240,21 @@ export default function Annotate() {
                           }}
                         >
                           <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                            <div style={{ width: 14, height: 14, background: a.color, borderRadius: 3 }} />
+                            {(() => {
+                              const cls = classes.find(c => c.id === a.classId);
+                              return <div style={{ width: 14, height: 14, background: cls?.color || a._legacyColor || "#888", borderRadius: 3, flexShrink: 0 }} />;
+                            })()}
                             <div style={{ flex: 1 }}>
                               <Form.Select
                                 size="sm"
-                                value={a.className}
+                                value={a.classId || ""}
                                 onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
                               >
+                                {!a.classId && (
+                                  <option value="" disabled>— Unclassified —</option>
+                                )}
                                 {classes.map((c) => (
-                                  <option key={c.id} value={c.name}>
+                                  <option key={c.id} value={c.id}>
                                     {c.name}
                                   </option>
                                 ))}

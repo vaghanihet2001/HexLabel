@@ -13,6 +13,7 @@ import {
   writeDatasetMetadata,
   writeJobFile,
   deleteJobFile,
+  readJobFile,
 } from "../../utils/fs";
 
 export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
@@ -58,6 +59,45 @@ export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
     const load = async () => {
       setLoading(true);
       try {
+        // --- Step 1: Sync jobs from filesystem into IndexedDB ---
+        // This ensures jobs are visible even after re-opening the project
+        // from disk without a full rebuild (e.g. just refreshing the page).
+        try {
+          const folder = await getDatasetFolder();
+          if (folder) {
+            const jobsFolder = await folder.getDirectoryHandle("jobs").catch(() => null);
+            if (jobsFolder) {
+              for await (const entry of jobsFolder.values()) {
+                if (entry.kind !== "file" || !entry.name.endsWith(".json")) continue;
+                try {
+                  const fh = await jobsFolder.getFileHandle(entry.name);
+                  const file = await fh.getFile();
+                  const job = JSON.parse(await file.text());
+                  if (!job?.id) continue;
+
+                  // Only upsert if not already in DB (avoid overwriting in-memory status)
+                  const existing = await db.jobs.get(job.id);
+                  if (!existing) {
+                    await db.jobs.put({
+                      id: job.id,
+                      name: job.name,
+                      datasetId,
+                      status: job.status || "not_started",
+                      createdAt: job.createdAt,
+                      imageIds: job.imageIds || [],
+                    });
+                  }
+                } catch (e) {
+                  console.warn("Failed to parse job file:", entry.name, e);
+                }
+              }
+            }
+          }
+        } catch (syncErr) {
+          console.warn("FS job sync failed:", syncErr);
+        }
+
+        // --- Step 2: Load from DB ---
         const list = await db.jobs.where("datasetId").equals(datasetId).toArray();
 
         // Attach dynamic image counts

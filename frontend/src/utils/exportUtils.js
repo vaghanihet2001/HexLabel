@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { db } from "./db";
+import { readDatasetClasses } from "./fs";
 
 /**
  * Export Formats Definition
@@ -37,40 +38,125 @@ export async function exportDatasetVersion(version, dataset, project, format = "
     const dsId = dataset.id;
     const vId = version.id;
 
+    // 0. Resolve dataset folder handle
+    let dsHandle = dataset.folderHandle || null;
+    if (!dsHandle && project?.folderHandle) {
+        try {
+            dsHandle = await project.folderHandle.getDirectoryHandle(dataset.name);
+        } catch { /* no folder access */ }
+    }
+
     // 1. Fetch Images
     const images = await db.images.where("datasetId").equals(dsId).toArray();
 
-    // 2. Fetch Annotations (Snapshot)
-    // We fetch annotations specifically for this versionId
-    const allAnnotations = await db.annotations.where("datasetId").equals(dsId)
+    let allAnnotations = [];
+    const allAnnsMap = new Map(); // deduplicate by imageId
+
+    // 1. MUST reliably scan File System (Source of Truth) unconditionally!
+    // Since auto-annotations or backend scripts write directly to disk, 
+    // IndexedDB usually only caches a fraction of the full dataset.
+    if (dsHandle) {
+        try {
+            const annotationsDir = await dsHandle.getDirectoryHandle("annotations");
+            let targetDir;
+            
+            try {
+                // Try version directory first
+                const versionsDir = await annotationsDir.getDirectoryHandle("versions");
+                targetDir = await versionsDir.getDirectoryHandle(vId);
+            } catch {
+                // Fall back to active working copy
+                targetDir = await annotationsDir.getDirectoryHandle("active");
+                console.warn("[export] No version folder found, using active annotations folder from FS");
+            }
+
+            for await (const entry of targetDir.values()) {
+                if (entry.kind === "file" && entry.name.endsWith(".json")) {
+                    try {
+                        const file = await entry.getFile();
+                        const data = JSON.parse(await file.text());
+                        if (data && data.imageId) {
+                            allAnnsMap.set(data.imageId, data);
+                        }
+                    } catch { /* skip corrupt */ }
+                }
+            }
+        } catch { /* no annotations folder */ }
+    }
+
+    // 2. Fetch from IndexedDB and merge (handles freshly edited unsaved changes)
+    let dbAnnotations = await db.annotations.where("datasetId").equals(dsId)
         .filter(a => a.versionId === vId)
         .toArray();
 
-    // Map: imageId -> annotations
-    const annMap = new Map();
-    allAnnotations.forEach(rec => {
-        if (rec.data && rec.data.length > 0) {
-            annMap.set(rec.imageId, rec.data);
+    if (dbAnnotations.length === 0) {
+        dbAnnotations = await db.annotations.where("datasetId").equals(dsId)
+            .filter(a => !a.versionId)
+            .toArray();
+    }
+
+    dbAnnotations.forEach(data => {
+        // DB annotations override FS since they represent the latest user edits
+        if (data && data.imageId) {
+            allAnnsMap.set(data.imageId, data);
         }
     });
 
-    // 3. Determine Classes
-    const classSet = new Set();
+    allAnnotations = Array.from(allAnnsMap.values());
+
+    // Map: imageId -> annotations array
+    const annMap = new Map();
     allAnnotations.forEach(rec => {
-        (rec.data || []).forEach(a => {
-            if (a.className) classSet.add(a.className);
+        const arr = rec.data ?? rec.annotations ?? [];
+        if (arr.length > 0) {
+            annMap.set(rec.imageId, arr);
+        }
+    });
+
+    // 3. Load class dictionary from dataset.json (source of truth)
+    // Annotations store classId (UUID); we need classId -> { name, index } mapping.
+    let diskClasses = [];
+    if (dsHandle) {
+        try {
+            diskClasses = await readDatasetClasses(dsHandle);
+        } catch (e) {
+            console.warn("[export] Could not read dataset classes from disk:", e);
+        }
+    }
+
+    // Build sorted class list from the class dictionary.
+    // Only include classes that actually appear in annotations.
+    const usedClassIds = new Set();
+    allAnnotations.forEach(rec => {
+        const arr = rec.data ?? rec.annotations ?? [];
+        arr.forEach(a => {
+            if (a.classId) usedClassIds.add(a.classId);
         });
     });
-    const classes = Array.from(classSet).sort();
-    const classToIndex = new Map(classes.map((c, i) => [c, i]));
+
+    // Filter and sort used classes by name for deterministic ordering
+    const classes = diskClasses
+        .filter(c => usedClassIds.has(c.id))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    // If disk classes are unavailable, build a minimal list from annotation data
+    if (classes.length === 0 && usedClassIds.size > 0) {
+        console.warn("[export] Class dictionary unavailable; class names will be missing.");
+    }
+
+    // classId (UUID) -> YOLO class index
+    const classToIndex = new Map(classes.map((c, i) => [c.id, i]));
+    // classId -> className (for data.yaml)
+    const classNames = classes.map(c => c.name);
 
     // 4. Prepare Data for Exporter
     const context = {
         zip,
         version,
         dataset,
-        classes,
-        classToIndex,
+        dsHandle,
+        classes: classNames,
+        classToIndex,  // keyed by classId UUID
         images,
         annMap,
     };
@@ -99,10 +185,11 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
 `;
     zip.file("data.yaml", yamlContent);
 
-    await processImages(ctx, (img, anns, width, height) => {
+    await processImages(ctx, (img, anns) => {
         const lines = [];
         for (const a of anns) {
-            const clsIdx = ctx.classToIndex.get(a.className);
+            // Resolve by classId (UUID) — the current storage format
+            const clsIdx = ctx.classToIndex.get(a.classId);
             if (clsIdx === undefined) continue;
 
             if (a.type === "bbox") {
@@ -152,10 +239,11 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
 `;
     zip.file("data.yaml", yamlContent);
 
-    await processImages(ctx, (img, anns, width, height) => {
+    await processImages(ctx, (img, anns) => {
         const lines = [];
         for (const a of anns) {
-            const clsIdx = ctx.classToIndex.get(a.className);
+            // Resolve by classId (UUID) — the current storage format
+            const clsIdx = ctx.classToIndex.get(a.classId);
             if (clsIdx === undefined) continue;
 
             if (a.type === "poly") {
@@ -168,7 +256,7 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
                 const x2 = Math.max(a.points[0], a.points[2]);
                 const y1 = Math.min(a.points[1], a.points[3]);
                 const y2 = Math.max(a.points[1], a.points[3]);
-                
+
                 const pts = [x1, y1, x2, y1, x2, y2, x1, y2];
                 const points = pts.map(p => p.toFixed(6)).join(" ");
                 lines.push(`${clsIdx} ${points}`);
@@ -182,7 +270,7 @@ names: [${classes.map(c => `"${c}"`).join(", ")}]
  * Helper: Process Images & Splits
  */
 async function processImages(ctx, formatAnnotationFn) {
-    const { zip, images, version, annMap, dataset } = ctx;
+    const { zip, images, version, annMap, dataset, dsHandle } = ctx;
 
     const folders = {
         train: { images: zip.folder("train").folder("images"), labels: zip.folder("train").folder("labels") },
@@ -207,9 +295,9 @@ async function processImages(ctx, formatAnnotationFn) {
         let blob = null;
         if (img.file instanceof Blob) {
             blob = img.file;
-        } else if (dataset.folderHandle) {
+        } else if (dsHandle) {
             try {
-                const imagesDir = await dataset.folderHandle.getDirectoryHandle("images");
+                const imagesDir = await dsHandle.getDirectoryHandle("images");
                 const rawDir = await imagesDir.getDirectoryHandle("raw");
                 const fh = await rawDir.getFileHandle(img.name);
                 blob = await fh.getFile();

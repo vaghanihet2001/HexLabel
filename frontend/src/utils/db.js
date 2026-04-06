@@ -3,7 +3,7 @@ import Dexie from "dexie";
 export const db = new Dexie("HexLabelDB");
 
 
-db.version(11).stores({
+db.version(12).stores({
   projects: "id, name, description, createdAt",
 
   datasets: "id, name, description, type, projectId, createdAt",
@@ -17,6 +17,12 @@ db.version(11).stores({
   images: "id, datasetId, jobId, name, createdAt",
 
   tempImages: "id, datasetId, name, createdAt",
+
+  // Class dictionary per dataset — source of truth is dataset.json, this is a cache
+  datasetClasses: "id, datasetId, name",
+
+  // Tag dictionary per dataset
+  datasetTags: "id, datasetId, name",
 });
 
 

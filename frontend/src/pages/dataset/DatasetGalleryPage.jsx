@@ -1,43 +1,53 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Card, Row, Col, Button, Form, Spinner, Dropdown, InputGroup, FormControl } from "react-bootstrap";
 import { useNavigate, useParams } from "react-router-dom";
-import { CheckSquare, Square } from "lucide-react";
+import { CheckSquare, Square, Tag, X } from "lucide-react";
 import { db } from "../../utils/db";
 import { useTheme } from "../../components/ThemeContext";
 import AppModal from "../../components/AppModal";
+import {
+  readDatasetTags,
+  readImageMeta,
+  updateImageMetaTags,
+  readDatasetClasses,
+  scanImageMetaFromDataset,
+} from "../../utils/fs";
 
 export default function DatasetGalleryPage({ datasetId }) {
   const { projectId } = useParams();
   const { themeColors } = useTheme();
   const navigate = useNavigate();
 
-  const [images, setImages] = useState([]);
-  const [classes, setClasses] = useState([]);
+  const [images, setImages]               = useState([]);
+  const [classes, setClasses]             = useState([]);   // classId list for filter (null = unlabeled)
+  const [datasetClasses, setDatasetClasses] = useState([]); // full class objects {id, name, color}
+  const [datasetTags, setDatasetTags]     = useState([]);   // tag dict from dataset.json
+  const [imageTagsMap, setImageTagsMap]   = useState({});   // { [imageId]: tagId[] }
   const [selectedClasses, setSelectedClasses] = useState(new Set());
+  const [selectedTags, setSelectedTags]   = useState(new Set());
   const [selectedImages, setSelectedImages] = useState(new Set());
-  const [searchQuery, setSearchQuery] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery]     = useState("");
+  const [loading, setLoading]             = useState(true);
 
-  // Map<imageName, Set<className>> for synchronous filtering
+  // Tag picker popover: which imageId is open
+  const [tagPickerOpen, setTagPickerOpen] = useState(null);
+  const tagPickerRef = useRef(null);
+
+  // dataset/project folder handles kept for tag writes
+  const dsFolderRef = useRef(null);
+
+  // Map<imageId, Set<classId>> for filtering
   const [imageLabelsMap, setImageLabelsMap] = useState(new Map());
 
-  // Modal state
-  const [modal, setModal] = useState({
-    show: false,
-    type: "info",
-    title: "",
-    message: "",
-    confirmText: "OK",
-    cancelText: "Cancel",
-    onConfirm: null,
-    autoClose: false,
-  });
-
+  const [modal, setModal] = useState({ show: false });
   const openModal = (data) => setModal({ ...modal, ...data, show: true });
   const closeModal = () => setModal((prev) => ({ ...prev, show: false, onConfirm: null }));
 
   const createdUrlsRef = useRef(new Set());
 
+  // -------------------------------------------------------------------------
+  // Load
+  // -------------------------------------------------------------------------
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -50,61 +60,150 @@ export default function DatasetGalleryPage({ datasetId }) {
         ]);
         if (!ds) return;
 
-        const jobs = await db.jobs.where({ datasetId, status: "completed" }).toArray();
-        const imgs = await db.images.where("datasetId").equals(datasetId).toArray();
+        const dsFolder = ds.folderHandle ||
+          (proj?.folderHandle ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null) : null);
+        dsFolderRef.current = dsFolder;
+
+        // ── Step 1: Load classes from dataset.json (source of truth) ─────────
+        // Don't derive class names from annotation records — that table may be
+        // empty after a rebuild. The class dictionary always lives in dataset.json.
+        let datasetClasses = [];
+        if (dsFolder) {
+          try { datasetClasses = await readDatasetClasses(dsFolder); } catch { }
+        }
+        if (mounted) {
+          setDatasetClasses(datasetClasses);
+          // Build display names list + include an "Unlabeled" sentinel (null)
+          setClasses([null, ...datasetClasses.map(c => c.id)]);
+        }
+
+        // ── Step 2: Load tags dictionary from dataset.json ────────────────────
+        const tags = dsFolder ? await readDatasetTags(dsFolder) : [];
+        if (mounted) setDatasetTags(tags);
+
+        // ── Step 3: Sync images from FS (images/meta/) → db.images ───────────
+        // CRITICAL: verify the raw file actually exists before upserting.
+        // If we sync a meta file whose raw image was deleted, the image will
+        // ghost-resurrect in the gallery on next load.
+        let rawDirHandle = null;
+        if (dsFolder) {
+          try {
+            const imagesDir = await dsFolder.getDirectoryHandle("images");
+            rawDirHandle = await imagesDir.getDirectoryHandle("raw");
+          } catch { /* no images folder yet */ }
+
+          if (rawDirHandle) {
+            try {
+              const fsMetas = await scanImageMetaFromDataset(dsFolder);
+              for (const meta of fsMetas) {
+                // Verify raw file exists — if not, the image was deleted
+                try { await rawDirHandle.getFileHandle(meta.name); }
+                catch { continue; }
+                const existing = await db.images.get(meta.id);
+                if (!existing) await db.images.put({ ...meta, datasetId });
+              }
+            } catch (syncErr) {
+              console.warn("[gallery] FS image sync failed:", syncErr);
+            }
+          }
+        }
+
+        // ── Step 4: Load images from DB ───────────────────────────────────────
+        const dbImgs = await db.images.where("datasetId").equals(datasetId).toArray();
+
+        // Exclude images that are still in the temp upload staging area
+        // (those belong on the Upload page, not the gallery)
+        const tempIds = new Set(
+          (await db.tempImages.where("datasetId").equals(datasetId).toArray()).map(t => t.id)
+        );
+
+        // Deduplicate by id (in case rebuild + upload both wrote the same record)
+        const seen = new Set();
+        const imgs = dbImgs.filter(img => {
+          if (tempIds.has(img.id)) return false;
+          if (seen.has(img.id)) return false;
+          seen.add(img.id);
+          return true;
+        });
 
         const resolved = [];
-        for (const img of imgs) {
-          let url = null;
-          try {
-            // Try to get dataset folder handle (from dataset or project)
-            const dsFolder = ds.folderHandle || (proj?.folderHandle ? await proj.folderHandle.getDirectoryHandle(ds.name).catch(() => null) : null);
+        const tagsMap = {};
 
-            if (dsFolder) {
-              try {
-                // images are stored under images/raw/<name>
-                const imagesDir = await dsFolder.getDirectoryHandle("images");
-                const rawDir = await imagesDir.getDirectoryHandle("raw");
-                const fh = await rawDir.getFileHandle(img.name);
-                const file = await fh.getFile();
-                url = URL.createObjectURL(file);
-                createdUrlsRef.current.add(url);
-              } catch { }
-            }
-            if (!url && img.url) url = img.url;
-          } catch (e) {
-            console.warn("Failed to create URL for image", img.name, e);
+        for (const img of imgs) {
+          // NEVER use img.url as a fallback — blob: URLs from a previous page
+          // session are dead strings that pass !url checks but can't load images.
+          // Only accept a URL created live from a real FileSystemFileHandle.
+          let url = null;
+          if (rawDirHandle) {
+            try {
+              const fh = await rawDirHandle.getFileHandle(img.name);
+              const file = await fh.getFile();
+              url = URL.createObjectURL(file);
+              createdUrlsRef.current.add(url);
+            } catch { /* file not on disk */ }
           }
+
+          if (!url) {
+            // Orphaned DB record — auto-clean so it won't reappear next load
+            db.images.delete(img.id).catch(() => {});
+            continue;
+          }
+
+          // Load tagIds from meta file (or fallback to DB record)
+          let tagIds = img.tagIds ?? [];
+          if (dsFolder) {
+            try {
+              const meta = await readImageMeta(dsFolder, img.id);
+              if (meta?.tagIds) tagIds = meta.tagIds;
+            } catch { }
+          }
+          tagsMap[img.id] = tagIds;
+
           resolved.push({ ...img, url });
         }
 
         if (!mounted) return;
         setImages(resolved);
+        setImageTagsMap(tagsMap);
 
-        // derive classes from annotations
-        const allAnn = await db.annotations.where("datasetId").equals(datasetId).toArray();
-        const labels = new Set();
-        const map = new Map();
+        // ── Step 5: Build per-image label map (imageId → Set<classId>) ────────
+        // Primary: use db.annotations (populated when user annotates).
+        // Fallback: scan annotations/active/*.json from FS — this is necessary
+        // after a project rebuild when db.annotations is empty.
+        const annoMap = new Map();
 
-        for (const ann of allAnn) {
-          const arr = ann?.data ?? [];
-          const imgLabels = new Set();
-          for (const a of arr) {
-            if (a.className) {
-              labels.add(a.className);
-              imgLabels.add(a.className);
+        const dbAnns = await db.annotations.where("datasetId").equals(datasetId)
+          .filter(a => !a.versionId)
+          .toArray();
+
+        if (dbAnns.length > 0) {
+          for (const ann of dbAnns) {
+            const arr = ann?.data ?? ann?.annotations ?? [];
+            const ids = new Set(arr.filter(a => a.classId).map(a => a.classId));
+            if (ids.size > 0) annoMap.set(ann.imageId, ids);
+          }
+        } else if (dsFolder) {
+          // Scan FS annotation files
+          try {
+            const annotationsDir = await dsFolder.getDirectoryHandle("annotations");
+            const activeDir = await annotationsDir.getDirectoryHandle("active");
+            for await (const entry of activeDir.values()) {
+              if (entry.kind !== "file" || !entry.name.endsWith(".json")) continue;
+              try {
+                const fh = await activeDir.getFileHandle(entry.name);
+                const file = await fh.getFile();
+                const data = JSON.parse(await file.text());
+                const arr = data?.annotations ?? [];
+                const ids = new Set(arr.filter(a => a.classId).map(a => a.classId));
+                if (ids.size > 0) annoMap.set(data.imageId, ids);
+              } catch { /* skip corrupt files */ }
             }
-          }
-          if (imgLabels.size > 0) {
-            // Use imageId as key for robustness
-            map.set(ann.imageId, imgLabels);
-          }
+          } catch { /* no annotations/active folder */ }
         }
-        labels.add(null); // include images with no annotations
-        setClasses(Array.from(labels));
-        setImageLabelsMap(map);
+
+        setImageLabelsMap(annoMap);
       } catch (err) {
-        console.error("Failed to load images/classes:", err);
+        console.error("Failed to load images:", err);
       } finally {
         if (mounted) setLoading(false);
       }
@@ -117,14 +216,49 @@ export default function DatasetGalleryPage({ datasetId }) {
     };
   }, [datasetId, projectId]);
 
+  // Close tag picker when clicking outside
   useEffect(() => {
-    setSelectedImages(new Set());
-  }, [searchQuery, selectedClasses]);
+    const handler = (e) => {
+      if (tagPickerRef.current && !tagPickerRef.current.contains(e.target)) {
+        setTagPickerOpen(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
+  // -------------------------------------------------------------------------
+  // Tag actions
+  // -------------------------------------------------------------------------
+  const toggleTagOnImage = useCallback(async (imageId, tagId) => {
+    setImageTagsMap((prev) => {
+      const current = prev[imageId] ?? [];
+      const updated = current.includes(tagId)
+        ? current.filter((t) => t !== tagId)
+        : [...current, tagId];
+      // Persist to meta file
+      if (dsFolderRef.current) {
+        updateImageMetaTags(dsFolderRef.current, imageId, updated).catch(console.warn);
+      }
+      return { ...prev, [imageId]: updated };
+    });
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Filter
+  // -------------------------------------------------------------------------
   const toggleClass = (cls) => {
     setSelectedClasses((prev) => {
       const copy = new Set(prev);
       copy.has(cls) ? copy.delete(cls) : copy.add(cls);
+      return copy;
+    });
+  };
+
+  const toggleTagFilter = (tagId) => {
+    setSelectedTags((prev) => {
+      const copy = new Set(prev);
+      copy.has(tagId) ? copy.delete(tagId) : copy.add(tagId);
       return copy;
     });
   };
@@ -137,38 +271,88 @@ export default function DatasetGalleryPage({ datasetId }) {
     });
   };
 
+  const filteredImages = images.filter((img) => {
+    if (searchQuery && !(img.originalName || img.name).toLowerCase().includes(searchQuery.toLowerCase()))
+      return false;
+
+    if (selectedClasses.size > 0) {
+      const imgLabels = imageLabelsMap.get(img.id);
+      if (!imgLabels && selectedClasses.has(null)) { /* match unlabeled */ }
+      else if (!imgLabels) return false;
+      else {
+        const hasMatch = [...imgLabels].some((c) => selectedClasses.has(c));
+        if (!hasMatch) return false;
+      }
+    }
+
+    if (selectedTags.size > 0) {
+      const imgTags = imageTagsMap[img.id] ?? [];
+      const hasTagMatch = [...selectedTags].some((t) => imgTags.includes(t));
+      if (!hasTagMatch) return false;
+    }
+
+    return true;
+  });
+
+  // -------------------------------------------------------------------------
+  // Delete
+  // -------------------------------------------------------------------------
   const deleteSelectedImages = async () => {
     if (selectedImages.size === 0) return;
-
-    // Check if dataset has versions
     const versionCount = await db.datasetVersions.where("datasetId").equals(datasetId).count();
     if (versionCount > 0) {
       openModal({
         type: "info",
         title: "Cannot Delete Images",
-        message: "This dataset has saved versions. Deleting images would break these versions. Please delete the versions first if you wish to remove images.",
+        message: "This dataset has saved versions. Please delete versions first.",
         confirmText: "OK",
-        onConfirm: () => closeModal(),
+        onConfirm: closeModal,
       });
       return;
     }
-
     openModal({
       type: "confirm",
       title: "Delete Images?",
-      message: `Are you sure you want to delete ${selectedImages.size} selected images?`,
+      message: `Delete ${selectedImages.size} selected images?`,
       confirmText: "Delete",
       cancelText: "Cancel",
       onConfirm: async () => {
         setLoading(true);
         try {
-          for (const id of selectedImages) await db.images.delete(id);
+          const folder = dsFolderRef.current;
+          let rawDir, metaDir, activeAnnsDir;
+          if (folder) {
+            try {
+              const imagesDir = await folder.getDirectoryHandle("images");
+              rawDir = await imagesDir.getDirectoryHandle("raw");
+              metaDir = await imagesDir.getDirectoryHandle("meta");
+            } catch { }
+            try {
+              const annotationsDir = await folder.getDirectoryHandle("annotations");
+              activeAnnsDir = await annotationsDir.getDirectoryHandle("active");
+            } catch { }
+          }
+
+          for (const id of selectedImages) {
+            const img = images.find(i => i.id === id);
+            
+            // 1. Delete from IndexedDB (images + annotations)
+            await db.images.delete(id);
+            await db.annotations.where("datasetId").equals(datasetId).and(a => a.imageId === id).delete().catch(() => {});
+
+            // 2. Delete physical files from disk so they don't resurrect on next sync
+            if (folder && img) {
+              if (rawDir) await rawDir.removeEntry(img.name).catch(() => {});
+              if (metaDir) await metaDir.removeEntry(`${id}.json`).catch(() => {});
+              if (activeAnnsDir) await activeAnnsDir.removeEntry(`${id}.json`).catch(() => {});
+            }
+          }
+          
           setImages((prev) => prev.filter((img) => !selectedImages.has(img.id)));
           setSelectedImages(new Set());
           return true;
         } catch (err) {
           console.error("Failed to delete images:", err);
-          return false;
         } finally {
           setLoading(false);
         }
@@ -177,27 +361,10 @@ export default function DatasetGalleryPage({ datasetId }) {
     });
   };
 
-  // Filter images by search and selected classes
-  const filteredImages = images.filter((img) => {
-    if (searchQuery && !img.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-
-    if (selectedClasses.size === 0) return true;
-
-    // Synchronous lookup using pre-computed map (keyed by imageId)
-    const imgLabels = imageLabelsMap.get(img.id);
-
-    // If image has no labels in map, it matches "Unlabeled" (null) filter
-    if (!imgLabels && selectedClasses.has(null)) return true;
-
-    // If image has labels, check if any match selected classes
-    if (imgLabels) {
-      for (const cls of imgLabels) {
-        if (selectedClasses.has(cls)) return true;
-      }
-    }
-
-    return false;
-  });
+  // -------------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------------
+  const tc = themeColors;
 
   if (loading)
     return (
@@ -209,129 +376,217 @@ export default function DatasetGalleryPage({ datasetId }) {
   return (
     <div>
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
-      {/* Toolbar */}
-      <div >
-        <div className="d-flex justify-content-start align-items-center mb-3 flex-wrap gap-2">
-          <InputGroup style={{ maxWidth: 250 }}>
-            <FormControl
-              placeholder="Search by image name..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </InputGroup>
 
+      {/* ---- Toolbar ---- */}
+      <div className="d-flex justify-content-start align-items-center mb-3 flex-wrap gap-2">
+        <InputGroup style={{ maxWidth: 240 }}>
+          <FormControl
+            placeholder="Search by name…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ background: tc.inputBg, color: tc.text, borderColor: tc.border }}
+          />
+        </InputGroup>
+
+        {/* Class filter */}
+        <Dropdown autoClose="outside">
+          <Dropdown.Toggle size="sm" variant="outline-secondary" id="class-filter-dd"
+            style={{ background: tc.buttonBg, color: tc.text, borderColor: tc.border }}>
+            Classes {selectedClasses.size > 0 && <span style={{ marginLeft: 4, background: tc.primary, color: "#fff", borderRadius: 10, padding: "0 6px", fontSize: 11 }}>{selectedClasses.size}</span>}
+          </Dropdown.Toggle>
+          <Dropdown.Menu style={{ maxHeight: 200, overflowY: "auto", padding: "0.5rem", backgroundColor: tc.cardBg, color: tc.text, border: `1px solid ${tc.border}` }}>
+            {classes.map((cls, idx) => (
+              <div key={idx} style={{ padding: "4px 8px", cursor: "pointer" }}
+                onClick={(e) => { e.stopPropagation(); toggleClass(cls); }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {selectedClasses.has(cls) ? <CheckSquare size={15} color={tc.primary} /> : <Square size={15} color={tc.text} />}
+                  <span style={{ fontSize: 13 }}>
+                    {cls === null
+                      ? "Unlabeled"
+                      : (datasetClasses?.find ? datasetClasses.find(c => c.id === cls)?.name : null) || cls}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </Dropdown.Menu>
+        </Dropdown>
+
+        {/* Tag filter */}
+        {datasetTags.length > 0 && (
           <Dropdown autoClose="outside">
-            <Dropdown.Toggle
-              size="sm"
-              variant="outline-secondary"
-              id="dropdown-basic"
-              style={{
-                background: themeColors.buttonBg,
-                color: themeColors.text,
-                borderColor: themeColors.border,
-              }}
-            >
-              Classes Filter
+            <Dropdown.Toggle size="sm" variant="outline-secondary" id="tag-filter-dd"
+              style={{ background: tc.buttonBg, color: tc.text, borderColor: tc.border }}>
+              <Tag size={13} style={{ marginRight: 4 }} />
+              Tags {selectedTags.size > 0 && <span style={{ marginLeft: 4, background: tc.primary, color: "#fff", borderRadius: 10, padding: "0 6px", fontSize: 11 }}>{selectedTags.size}</span>}
             </Dropdown.Toggle>
-            <Dropdown.Menu
-              style={{
-                maxHeight: 200,
-                overflowY: "auto",
-                padding: "0.5rem",
-                backgroundColor: themeColors.cardBg,
-                color: themeColors.text,
-                border: `1px solid ${themeColors.border}`,
-              }}
-            >
-              {classes.map((cls, idx) => (
-                <div
-                  key={idx}
-                  className="dropdown-item-custom"
-                  style={{ padding: "4px 8px", cursor: "pointer" }}
-                  onClick={(e) => {
-                    e.stopPropagation(); // Prevent dropdown close
-                    toggleClass(cls);
-                  }}
-                >
+            <Dropdown.Menu style={{ maxHeight: 220, overflowY: "auto", padding: "0.5rem", backgroundColor: tc.cardBg, color: tc.text, border: `1px solid ${tc.border}` }}>
+              {datasetTags.map((tag) => (
+                <div key={tag.id} style={{ padding: "4px 8px", cursor: "pointer" }}
+                  onClick={(e) => { e.stopPropagation(); toggleTagFilter(tag.id); }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {selectedClasses.has(cls) ? (
-                      <CheckSquare size={16} color={themeColors.primary} />
-                    ) : (
-                      <Square size={16} color={themeColors.text} />
-                    )}
-                    <span>{cls ?? "Unlabeled"}</span>
+                    {selectedTags.has(tag.id) ? <CheckSquare size={15} color={tc.primary} /> : <Square size={15} color={tc.text} />}
+                    <div style={{ width: 10, height: 10, borderRadius: 3, background: tag.color, flexShrink: 0 }} />
+                    <span style={{ fontSize: 13 }}>{tag.name}</span>
                   </div>
                 </div>
               ))}
             </Dropdown.Menu>
           </Dropdown>
+        )}
 
-          <Button size="sm" variant="outline-danger" onClick={deleteSelectedImages}>
-            Delete Selected
-          </Button>
-        </div>
-        <div>
-          <strong>{filteredImages.length} images</strong>
-        </div>
+        <Button size="sm" variant="outline-danger" onClick={deleteSelectedImages}>
+          Delete Selected
+        </Button>
       </div>
 
-      {/* Image Grid */}
+      <div style={{ color: tc.subtleText, fontSize: 13, marginBottom: 12 }}>
+        <strong style={{ color: tc.text }}>{filteredImages.length}</strong> images
+      </div>
+
+      {/* ---- Image Grid ---- */}
       <Row xs={2} sm={3} md={4} lg={5} className="g-3">
-        {filteredImages.map((img) => (
-          <Col key={img.id}>
-            <Card
-              style={{
+        {filteredImages.map((img) => {
+          const imgTags = imageTagsMap[img.id] ?? [];
+          return (
+            <Col key={img.id}>
+              <Card style={{
                 position: "relative",
-                background: themeColors.cardBg,
-                color: themeColors.text,
+                background: tc.cardBg,
+                color: tc.text,
                 border: selectedImages.has(img.id)
-                  ? `2px solid ${themeColors.primary}`
-                  : `1px solid ${themeColors.border}`,
+                  ? `2px solid ${tc.primary}`
+                  : `1px solid ${tc.border}`,
                 cursor: "pointer",
                 transition: "0.2s",
-              }}
-            >
-              <div style={{ position: "absolute", top: 5, left: 5, zIndex: 10 }}>
-                <div onClick={() => toggleImageSelect(img.id)}>
-                  {selectedImages.has(img.id) ? (
-                    <CheckSquare color={themeColors.primary} />
-                  ) : (
-                    <Square color={themeColors.text} />
-                  )}
+                borderRadius: 10,
+                overflow: "visible",
+              }}>
+                {/* Select checkbox */}
+                <div style={{ position: "absolute", top: 5, left: 5, zIndex: 10 }}
+                  onClick={() => toggleImageSelect(img.id)}>
+                  {selectedImages.has(img.id)
+                    ? <CheckSquare color={tc.primary} size={18} />
+                    : <Square color={tc.text} size={18} />}
                 </div>
-              </div>
 
-              <div style={{ height: 120, overflow: "hidden", borderRadius: "8px 8px 0 0" }}>
-                <img
-                  src={img.url}
-                  alt={img.name}
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                  onError={(e) => console.warn("Image failed to load:", img.name)}
-                />
-              </div>
+                {/* Annotate button */}
+                <div style={{ position: "absolute", top: 3, right: 5, zIndex: 10 }}>
+                  <Button size="sm" variant="outline-primary" className="mt-1 p-1"
+                    style={{ fontSize: "0.65rem" }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/annotate/${projectId}/${datasetId}/${img.jobId || "unassigned"}?imageId=${img.id}`);
+                    }}>
+                    🖊
+                  </Button>
+                </div>
 
-              <div style={{ position: "absolute", top: 3, right: 5, zIndex: 10 }}>
-                <Button
-                  size="sm"
-                  variant="outline-primary"
-                  className="mt-1 p-1"
-                  style={{ fontSize: "0.65rem" }}
-                  onClick={() =>
-                    navigate(`/annotate/${projectId}/${datasetId}/${img.jobId || ""}?imageId=${img.id}`)
-                  }
-                >
-                  🖊
-                </Button>
-              </div>
-              <div style={{ position: "absolute", top: 5, left: 5, zIndex: 10 }}></div>
+                {/* Thumbnail */}
+                <div style={{ height: 120, overflow: "hidden", borderRadius: "10px 10px 0 0" }}>
+                  <img src={img.url} alt={img.originalName || img.name}
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                    onError={() => console.warn("Image failed to load:", img.name)} />
+                </div>
 
-              <Card.Body className="p-2 text-center">
-                <div style={{ fontSize: "0.8rem", color: themeColors.subtleText }}>{img.name}</div>
+                {/* Name */}
+                <Card.Body className="p-2">
+                  <div style={{ fontSize: "0.72rem", color: tc.subtleText, marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={img.originalName || img.name}>
+                    {img.originalName || img.name}
+                  </div>
 
-              </Card.Body>
-            </Card>
-          </Col>
-        ))}
+                  {/* Tag chips row */}
+                  {datasetTags.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 3, alignItems: "center", minHeight: 20 }}>
+                      {/* Existing tag chips */}
+                      {imgTags.map((tagId) => {
+                        const tag = datasetTags.find((t) => t.id === tagId);
+                        if (!tag) return null;
+                        return (
+                          <span key={tagId} style={{
+                            background: tag.color + "33",
+                            border: `1px solid ${tag.color}`,
+                            color: tag.color,
+                            borderRadius: 10,
+                            fontSize: 10,
+                            padding: "1px 6px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 3,
+                            cursor: "pointer",
+                          }}
+                            onClick={(e) => { e.stopPropagation(); toggleTagOnImage(img.id, tagId); }}
+                            title={`Remove tag "${tag.name}"`}>
+                            {tag.name}
+                            <X size={9} />
+                          </span>
+                        );
+                      })}
+
+                      {/* Add tag button */}
+                      <span style={{ position: "relative" }}>
+                        <span
+                          style={{
+                            background: tc.inputBg,
+                            border: `1px dashed ${tc.border}`,
+                            color: tc.subtleText,
+                            borderRadius: 10,
+                            fontSize: 10,
+                            padding: "1px 6px",
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 3,
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setTagPickerOpen(tagPickerOpen === img.id ? null : img.id);
+                          }}
+                          title="Add tag">
+                          <Tag size={9} /> +
+                        </span>
+
+                        {/* Tag picker popover */}
+                        {tagPickerOpen === img.id && (
+                          <div ref={tagPickerRef} style={{
+                            position: "absolute",
+                            bottom: "calc(100% + 6px)",
+                            left: 0,
+                            zIndex: 9999,
+                            background: tc.cardBg,
+                            border: `1px solid ${tc.border}`,
+                            borderRadius: 8,
+                            padding: "8px",
+                            minWidth: 150,
+                            boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+                          }}>
+                            <div style={{ fontSize: 11, color: tc.subtleText, marginBottom: 6, fontWeight: 600 }}>Add / remove tags</div>
+                            {datasetTags.map((tag) => {
+                              const active = imgTags.includes(tag.id);
+                              return (
+                                <div key={tag.id}
+                                  style={{
+                                    display: "flex", alignItems: "center", gap: 7,
+                                    padding: "4px 6px", borderRadius: 6, cursor: "pointer",
+                                    background: active ? tag.color + "22" : "transparent",
+                                  }}
+                                  onClick={(e) => { e.stopPropagation(); toggleTagOnImage(img.id, tag.id); }}>
+                                  <div style={{ width: 10, height: 10, borderRadius: 3, background: tag.color, flexShrink: 0 }} />
+                                  <span style={{ fontSize: 12, color: tc.text, flex: 1 }}>{tag.name}</span>
+                                  {active && <CheckSquare size={13} color={tag.color} />}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </span>
+                    </div>
+                  )}
+                </Card.Body>
+              </Card>
+            </Col>
+          );
+        })}
       </Row>
     </div>
   );
