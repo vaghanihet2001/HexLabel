@@ -75,9 +75,16 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
 
     const id = generateId?.() || crypto.randomUUID();
 
+    // Only snapshot annotations belonging to completed jobs
+    const completedJobs = await db.jobs.where("datasetId").equals(datasetId).filter(j => j.status === "completed").toArray();
+    const completedJobIds = new Set(completedJobs.map(j => j.id));
+
+    const validImages = await db.images.where("datasetId").equals(datasetId).filter(img => completedJobIds.has(img.jobId)).toArray();
+    const validImageIds = new Set(validImages.map(img => img.id));
+
     const currentAnns = await db.annotations
       .where("datasetId").equals(datasetId)
-      .filter(a => !a.versionId)
+      .filter(a => !a.versionId && validImageIds.has(a.imageId))
       .toArray();
 
     const snapshotAnns = currentAnns.map(a => ({

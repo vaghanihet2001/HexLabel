@@ -102,7 +102,7 @@ export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
 
         // Attach dynamic image counts
         for (const job of list) {
-          job.imageCount = job.imageIds ? job.imageIds.length : 0;
+          job.imageCount = await db.images.where("jobId").equals(job.id).count();
         }
 
         if (mounted) setJobs(list);

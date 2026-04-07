@@ -46,8 +46,12 @@ export async function exportDatasetVersion(version, dataset, project, format = "
         } catch { /* no folder access */ }
     }
 
-    // 1. Fetch Images
-    const images = await db.images.where("datasetId").equals(dsId).toArray();
+    // 1. Fetch Images (only from completed jobs, matching gallery logic)
+    const completedJobs = await db.jobs.where("datasetId").equals(dsId).filter(j => j.status === "completed").toArray();
+    const completedJobIds = new Set(completedJobs.map(j => j.id));
+
+    const allImages = await db.images.where("datasetId").equals(dsId).toArray();
+    const images = allImages.filter(img => completedJobIds.has(img.jobId));
 
     let allAnnotations = [];
     const allAnnsMap = new Map(); // deduplicate by imageId

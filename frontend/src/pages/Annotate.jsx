@@ -2191,7 +2191,7 @@ export default function Annotate() {
                           size="sm"
                           variant="outline-secondary"
                           onClick={() => {
-                            if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.name);
+                            if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.id);
                           }}
                         >
                           Assign

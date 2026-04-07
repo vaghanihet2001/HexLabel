@@ -17,15 +17,17 @@ export async function rebuildDatabaseFromProject(projectFolderHandle) {
 
   if (!projectFolderHandle) throw new Error("projectFolderHandle missing");
 
-  // clear ONLY project-related tables
-  await clearProjectTables();
-
   // -------- Step 1: Read project metadata --------
   const projectMeta = await readProjectMetadata(projectFolderHandle);
   if (!projectMeta) throw new Error("hexlabel.project.json not found");
+  
+  const projectId = projectMeta.id || projectFolderHandle.name;
+
+  // clear ONLY data for this specific project
+  await clearProjectData(projectId);
 
   const projectRecord = {
-    id: projectMeta.id || projectFolderHandle.name,
+    id: projectId,
     name: projectMeta.name || projectFolderHandle.name,
     description: projectMeta.description || "",
     folderHandle: projectFolderHandle,
@@ -49,19 +51,24 @@ export async function rebuildDatabaseFromProject(projectFolderHandle) {
 }
 
 /**
- * Deletes all dataset/project/job/image records before rebuilding
+ * Deletes all dataset/project/job/image records for a SPECIFIC project before rebuilding
  */
-async function clearProjectTables() {
+async function clearProjectData(projectId) {
   await db.transaction("rw", db.projects, db.datasets, db.jobs, db.images, db.annotations, db.tempImages, db.datasetVersions, async () => {
-    await db.projects.clear();
-    await db.datasets.clear();
-    await db.jobs.clear();
-    await db.images.clear();
-    await db.annotations.clear();
-    await db.tempImages.clear();
-    await db.datasetVersions.clear();
+    const datasets = await db.datasets.where("projectId").equals(projectId).toArray();
+    const datasetIds = datasets.map(d => d.id);
+
+    await db.datasets.where("projectId").equals(projectId).delete();
+
+    for (const dsId of datasetIds) {
+      await db.jobs.where("datasetId").equals(dsId).delete();
+      await db.images.where("datasetId").equals(dsId).delete();
+      await db.annotations.where("datasetId").equals(dsId).delete();
+      await db.tempImages.where("datasetId").equals(dsId).delete();
+      await db.datasetVersions.where("datasetId").equals(dsId).delete();
+    }
   });
-  console.log("🧹 Cleared Dexie tables.");
+  console.log(`🧹 Cleared old Dexie data for project: ${projectId}`);
 }
 
 /**

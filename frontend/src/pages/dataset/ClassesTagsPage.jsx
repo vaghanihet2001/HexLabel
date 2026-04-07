@@ -155,6 +155,13 @@ export default function ClassesTagsPage() {
               setProgress({ label: `Removing annotations…`, current: p.current, total: p.total, file: p.file })
             );
           }
+          
+          // Modify Dexie DB to mirror FS changes instantly
+          await db.annotations.filter(a => Array.isArray(a.data) && a.data.some(d => d.classId === cls.id))
+            .modify(a => {
+               a.data = a.data.filter(d => d.classId !== cls.id);
+            });
+
           await saveClasses(classes.filter(c => c.id !== cls.id));
           setProgressDone(`Done — class "${cls.name}" deleted.`);
         } catch (e) {
@@ -188,6 +195,13 @@ export default function ClassesTagsPage() {
               setProgress({ label: `Rewriting annotations…`, current: p.current, total: p.total, file: p.file })
             );
           }
+
+          // Modify Dexie DB to mirror FS changes instantly
+          await db.annotations.filter(a => Array.isArray(a.data) && a.data.some(d => d.classId === mergeSource.id))
+            .modify(a => {
+               a.data = a.data.map(d => d.classId === mergeSource.id ? { ...d, classId: mergeTarget } : d);
+            });
+
           await saveClasses(classes.filter(c => c.id !== mergeSource.id));
           setMergeSource(null);
           setProgressDone(`Done — "${mergeSource.name}" merged into "${targetCls.name}".`);

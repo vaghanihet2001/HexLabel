@@ -111,16 +111,23 @@ export default function DatasetGalleryPage({ datasetId }) {
         // ── Step 4: Load images from DB ───────────────────────────────────────
         const dbImgs = await db.images.where("datasetId").equals(datasetId).toArray();
 
+        // Find completed jobs
+        const dbJobs = await db.jobs.where("datasetId").equals(datasetId).toArray();
+        const completedJobIds = new Set(
+          dbJobs.filter(j => j.status === "completed").map(j => j.id)
+        );
+
         // Exclude images that are still in the temp upload staging area
         // (those belong on the Upload page, not the gallery)
         const tempIds = new Set(
           (await db.tempImages.where("datasetId").equals(datasetId).toArray()).map(t => t.id)
         );
 
-        // Deduplicate by id (in case rebuild + upload both wrote the same record)
+        // Deduplicate by id and ONLY show images in COMPLETED jobs
         const seen = new Set();
         const imgs = dbImgs.filter(img => {
           if (tempIds.has(img.id)) return false;
+          if (!completedJobIds.has(img.jobId)) return false;
           if (seen.has(img.id)) return false;
           seen.add(img.id);
           return true;
