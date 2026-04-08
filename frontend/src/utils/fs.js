@@ -642,3 +642,86 @@ export async function migrateImageMeta(datasetHandle, dbImages, datasetId, onPro
 
   return { created };
 }
+
+/**
+ * deleteImageFiles — deletes raw image and its meta file
+ */
+export async function deleteImageFiles(datasetHandle, imageId, imageName) {
+  if (!datasetHandle) return;
+  try {
+    const imagesFolder = await datasetHandle.getDirectoryHandle("images");
+    
+    // 1. raw
+    try {
+      const rawFolder = await imagesFolder.getDirectoryHandle("raw");
+      await rawFolder.removeEntry(imageName);
+    } catch (e) { console.warn("raw delete failed", imageName, e); }
+
+    // 2. meta
+    try {
+      const metaFolder = await imagesFolder.getDirectoryHandle("meta");
+      await metaFolder.removeEntry(`${imageId}.json`);
+    } catch (e) { console.warn("meta delete failed", imageId, e); }
+  } catch (err) {
+    console.warn("deleteImageFiles error:", err);
+  }
+}
+
+/**
+ * deleteAnnotationFile — deletes annotation file from active/ and all versions/
+ * Falls back to various paths and name formats to ensure cleanup.
+ */
+export async function deleteAnnotationFile(datasetHandle, imageId, imageName = null) {
+  if (!datasetHandle) return;
+  try {
+    const annotationsHandle = await datasetHandle.getDirectoryHandle("annotations").catch(() => null);
+    if (!annotationsHandle) return;
+
+    const namesToTry = new Set();
+    if (imageId) namesToTry.add(`${imageId}.json`);
+    if (imageName) {
+      const base = imageName.includes(".") ? imageName.substring(0, imageName.lastIndexOf(".")) : imageName;
+      namesToTry.add(`${base}.json`);
+      if (imageName.endsWith(".json")) namesToTry.add(imageName);
+      else namesToTry.add(`${imageName}.json`);
+    }
+
+    const foldersToTry = ["active", "."]; // . means root of annotations/
+
+    for (const folderName of foldersToTry) {
+      try {
+        const targetFolder = folderName === "." ? annotationsHandle : await annotationsHandle.getDirectoryHandle(folderName).catch(() => null);
+        if (!targetFolder) continue;
+
+        for (const fname of namesToTry) {
+          try {
+            await targetFolder.removeEntry(fname);
+            console.log(`Successfully deleted annotation file: ${folderName}/${fname}`);
+          } catch (e) {
+            // entry not found, ignore
+          }
+        }
+      } catch (e) {
+        console.warn(`Error accessing folder ${folderName} during annotation delete:`, e);
+      }
+    }
+
+    // 2. versions
+    try {
+      const versionsHandle = await annotationsHandle.getDirectoryHandle("versions").catch(() => null);
+      if (versionsHandle) {
+        for await (const entry of versionsHandle.values()) {
+          if (entry.kind !== "directory") continue;
+          try {
+            const vHandle = await versionsHandle.getDirectoryHandle(entry.name);
+            for (const fname of namesToTry) {
+              await vHandle.removeEntry(fname).catch(() => {});
+            }
+          } catch (e) { /* skip */ }
+        }
+      }
+    } catch (e) { /* skip */ }
+  } catch (err) {
+    console.error("deleteAnnotationFile error:", err, "for imageId:", imageId);
+  }
+}

@@ -45,6 +45,8 @@ import {
   writeImageMeta,
   readDatasetClasses,
   addDatasetClass,
+  deleteImageFiles,
+  deleteAnnotationFile,
 } from "../utils/fs";
 
 /* ---------------------------
@@ -236,41 +238,7 @@ export default function Annotate() {
     }
   };
 
-  const deleteAnnotationFile = async (folderHandle, imageId) => {
-    if (!folderHandle) return;
-    try {
-      const annotationsHandle = await folderHandle.getDirectoryHandle("annotations", { create: false });
-      // delete active
-      try {
-        const activeHandle = await annotationsHandle.getDirectoryHandle("active");
-        await activeHandle.removeEntry(`${imageId}.json`).catch(() => { });
-      } catch { }
-      // delete from all versions (if any)
-      try {
-        const versionsHandle = await annotationsHandle.getDirectoryHandle("versions");
-        for await (const entry of versionsHandle.values()) {
-          if (entry.kind !== "directory") continue;
-          try {
-            const vHandle = await versionsHandle.getDirectoryHandle(entry.name);
-            await vHandle.removeEntry(`${imageId}.json`).catch(() => { });
-          } catch { }
-        }
-      } catch { }
-    } catch (err) {
-      // ignore
-    }
-  };
 
-  const deleteImageFile = async (folderHandle, imageName) => {
-    if (!folderHandle) return;
-    try {
-      const imagesHandle = await folderHandle.getDirectoryHandle("images");
-      const rawHandle = await imagesHandle.getDirectoryHandle("raw");
-      await rawHandle.removeEntry(imageName).catch(() => { });
-    } catch (err) {
-      console.warn("deleteImageFile failed:", err);
-    }
-  };
 
   const updateJobFileAfterImageDeletion = async (folderHandle, removedImageId) => {
     if (!folderHandle) return;
@@ -1510,18 +1478,20 @@ export default function Annotate() {
         }
       }
 
-      if (ev.key === "b" || ev.key === "B") setTool("bbox");
-      if (ev.key === "p" || ev.key === "P") setTool("poly");
-
       const activeElement = document.activeElement;
-      const isClassInputFocused = classInputRef.current && classInputRef.current === activeElement;
+      const isInputFocused = ["INPUT", "SELECT", "TEXTAREA"].includes(activeElement.tagName) || activeElement.isContentEditable;
 
-      if (!isClassInputFocused) {
+      if (!isInputFocused) {
+        if (ev.key === "b" || ev.key === "B") setTool("bbox");
+        if (ev.key === "p" || ev.key === "P") setTool("poly");
         if (ev.key === "a" || ev.key === "A" || ev.key === "ArrowLeft") {
           handlePrevImage();
         }
         if (ev.key === "d" || ev.key === "D" || ev.key === "ArrowRight") {
           handleNextImage();
+        }
+        if ((ev.key === "Delete" || ev.key === "Backspace") && ev.type === "keydown") {
+          if (selectedAnnId) deleteAnnotation(selectedAnnId);
         }
       }
 
@@ -1591,9 +1561,6 @@ export default function Annotate() {
         })();
       }
 
-      if ((ev.key === "Delete" || ev.key === "Backspace") && ev.type === "keydown") {
-        if (selectedAnnId) deleteAnnotation(selectedAnnId);
-      }
     };
 
     const onKeyUp = (ev) => {
@@ -1728,8 +1695,8 @@ export default function Annotate() {
           // 1) Delete file from disk (images/raw/<name>)
           const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
           if (dsFolder) {
-            await deleteImageFile(dsFolder, img.name);
-            await deleteAnnotationFile(dsFolder, img.id);
+            await deleteImageFiles(dsFolder, img.id, img.name);
+            await deleteAnnotationFile(dsFolder, img.id, img.name);
             // update job files and DB job.imageIds
             await updateJobFileAfterImageDeletion(dsFolder, img.id);
             // update dataset.json job counts

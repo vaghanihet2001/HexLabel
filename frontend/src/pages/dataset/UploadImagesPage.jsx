@@ -268,6 +268,7 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
     setStatusText("Creating job...");
 
     try {
+      const jobId = crypto.randomUUID();
       const imagesFolder = await dataset.folderHandle.getDirectoryHandle("images", { create: true });
       const rawFolder = await imagesFolder.getDirectoryHandle("raw", { create: true });
 
@@ -299,7 +300,7 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
           name: tempImg.name,           // filename on disk: <uuid>.jpg
           originalName: tempImg.originalName, // display name
           datasetId,
-          jobId: null,
+          jobId: jobId,
           createdAt: new Date().toISOString(),
         };
         const metaFh = await metaFolder.getFileHandle(`${tempImg.id}.json`, { create: true });
@@ -307,13 +308,13 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
         await mw.write(JSON.stringify(imageMeta, null, 2));
         await mw.close();
 
-        await db.images.put({ ...imageMeta, jobId: null });
+        await db.images.put({ ...imageMeta, jobId: jobId });
         imageIds.push(tempImg.id);
       }
 
       // ---------- CREATE JOB OBJECT ----------
       const job = {
-        id: crypto.randomUUID(),
+        id: jobId,
         datasetId,
         name: `Job - ${new Date().toLocaleString()}`,
         status: "not_started",
@@ -413,8 +414,8 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
             zIndex: 20,
           }}
         >
-          <Spinner animation="border" />
-          <div style={{ marginTop: 10 }}>{statusText}</div>
+          <Spinner animation="border" variant="primary" />
+          <div style={{ marginTop: 15, fontWeight: "bold", color: "#4f46e5" }}>{statusText}</div>
         </div>
       )}
 

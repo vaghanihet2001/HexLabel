@@ -14,6 +14,8 @@ import {
   writeJobFile,
   deleteJobFile,
   readJobFile,
+  deleteImageFiles,
+  deleteAnnotationFile,
 } from "../../utils/fs";
 
 export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
@@ -186,13 +188,24 @@ export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
       cancelText: "Cancel",
       onConfirm: async () => {
         try {
-          // Unassign images
-          await db.images.where("jobId").equals(job.id).modify({ jobId: null });
+          // Delete associated images and their files
+          const imagesToDelete = await db.images.where("jobId").equals(job.id).toArray();
+          const folder = await getDatasetFolder();
+
+          for (const img of imagesToDelete) {
+            // 1) Delete files from FS
+            if (folder) {
+              await deleteImageFiles(folder, img.id, img.name);
+              await deleteAnnotationFile(folder, img.id, img.name);
+            }
+            // 2) Remove annotations from DB
+            await db.annotations.where("datasetId").equals(datasetId).and(a => a.imageName === img.name).delete().catch(() => {});
+            // 3) Remove image from DB
+            await db.images.delete(img.id);
+          }
 
           // Delete job from DB
           await db.jobs.delete(job.id);
-
-          const folder = await getDatasetFolder();
 
           // Remove from dataset.json
           if (folder) {
