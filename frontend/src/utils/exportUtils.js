@@ -56,22 +56,41 @@ export async function exportDatasetVersion(version, dataset, project, format = "
     let allAnnotations = [];
     const allAnnsMap = new Map(); // deduplicate by imageId
 
+    let imageSourceDir;
+    let versionClasses;
+    let versionTags;
+
     // 1. MUST reliably scan File System (Source of Truth) unconditionally!
-    // Since auto-annotations or backend scripts write directly to disk, 
-    // IndexedDB usually only caches a fraction of the full dataset.
+    // For versions, we check the self-contained version folder first.
     if (dsHandle) {
         try {
             const annotationsDir = await dsHandle.getDirectoryHandle("annotations");
             let targetDir;
             
             try {
-                // Try version directory first
-                const versionsDir = await annotationsDir.getDirectoryHandle("versions");
-                targetDir = await versionsDir.getDirectoryHandle(vId);
-            } catch {
+                // Try self-contained version folder (at dataset root)
+                const versionsDir = await dsHandle.getDirectoryHandle("versions");
+                const vDir = await versionsDir.getDirectoryHandle(vId);
+                
+                targetDir = await vDir.getDirectoryHandle("annotations");
+                try {
+                    const vImagesDir = await vDir.getDirectoryHandle("images");
+                    imageSourceDir = await vImagesDir.getDirectoryHandle("raw");
+                } catch { /* old version without images */ }
+
+                // Overwrite classes from version metadata if present
+                try {
+                    const vMetadataFh = await vDir.getFileHandle("version.json");
+                    const vMetadataFile = await vMetadataFh.getFile();
+                    const vMetadata = JSON.parse(await vMetadataFile.text());
+                    if (vMetadata.classes) versionClasses = vMetadata.classes;
+                    if (vMetadata.tags) versionTags = vMetadata.tags;
+                } catch { /* fallback to dataset classes */ }
+
+            } catch (e) {
                 // Fall back to active working copy
                 targetDir = await annotationsDir.getDirectoryHandle("active");
-                console.warn("[export] No version folder found, using active annotations folder from FS");
+                if (vId) console.warn("[export] Version folder not found, falling back to active:", vId, e);
             }
 
             for await (const entry of targetDir.values()) {
@@ -89,11 +108,13 @@ export async function exportDatasetVersion(version, dataset, project, format = "
     }
 
     // 2. Fetch from IndexedDB and merge (handles freshly edited unsaved changes)
+    // For non-version exports (active), we merge latest DB state.
+    // For version exports, we ONLY check for specific versioned DB records (rare in new system).
     let dbAnnotations = await db.annotations.where("datasetId").equals(dsId)
         .filter(a => a.versionId === vId)
         .toArray();
 
-    if (dbAnnotations.length === 0) {
+    if (dbAnnotations.length === 0 && !vId) {
         dbAnnotations = await db.annotations.where("datasetId").equals(dsId)
             .filter(a => !a.versionId)
             .toArray();
@@ -129,7 +150,9 @@ export async function exportDatasetVersion(version, dataset, project, format = "
     }
 
     // Build sorted class list from the class dictionary.
-    // Only include classes that actually appear in annotations.
+    // Use version-locked classes if available, otherwise fall back to disk/db
+    const sourceClasses = versionClasses || diskClasses;
+    
     const usedClassIds = new Set();
     allAnnotations.forEach(rec => {
         const arr = rec.data ?? rec.annotations ?? [];
@@ -138,8 +161,7 @@ export async function exportDatasetVersion(version, dataset, project, format = "
         });
     });
 
-    // Filter and sort used classes by name for deterministic ordering
-    const classes = diskClasses
+    const classes = sourceClasses
         .filter(c => usedClassIds.has(c.id))
         .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -163,6 +185,9 @@ export async function exportDatasetVersion(version, dataset, project, format = "
         classToIndex,  // keyed by classId UUID
         images,
         annMap,
+        imageSourceDir,
+        versionClasses,
+        versionTags
     };
 
     // 5. Run Exporter
@@ -299,6 +324,13 @@ async function processImages(ctx, formatAnnotationFn) {
         let blob = null;
         if (img.file instanceof Blob) {
             blob = img.file;
+        } else if (ctx.imageSourceDir) {
+            try {
+                const fh = await ctx.imageSourceDir.getFileHandle(img.name);
+                blob = await fh.getFile();
+            } catch (e) {
+                console.warn("[export] Missing image in version folder:", img.name);
+            }
         } else if (dsHandle) {
             try {
                 const imagesDir = await dsHandle.getDirectoryHandle("images");
@@ -306,7 +338,7 @@ async function processImages(ctx, formatAnnotationFn) {
                 const fh = await rawDir.getFileHandle(img.name);
                 blob = await fh.getFile();
             } catch (e) {
-                console.warn("Missing image file", img.name);
+                console.warn("[export] Missing image file in root raw folder:", img.name);
             }
         }
 

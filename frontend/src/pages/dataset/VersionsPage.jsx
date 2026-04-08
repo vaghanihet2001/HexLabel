@@ -4,7 +4,12 @@ import { Button, ListGroup, Form } from "react-bootstrap";
 import { Pencil, Trash2, CheckCircle2, Settings } from "lucide-react";
 import { useTheme } from "../../components/ThemeContext";
 import { db, generateId } from "../../utils/db";
-import { writeVersionFile, deleteVersionFile, scanVersionsFromDatasetFolder } from "../../utils/fs";
+import { 
+  writeVersionFile, 
+  deleteVersionFile, 
+  scanVersionsFromDatasetFolder,
+  createVersionSnapshot 
+} from "../../utils/fs";
 import { exportDatasetVersion, EXPORT_FORMATS } from "../../utils/exportUtils";
 import AppModal from "../../components/AppModal";
 
@@ -101,12 +106,14 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
     };
 
     try {
+      setExporting(true); // Reuse exporting for "Creating..." feedback
       await db.datasetVersions.put(ver);
-      if (snapshotAnns.length > 0) await db.annotations.bulkPut(snapshotAnns);
-
-      // Write to FS
+      
+      // Full Filesystem Snapshot (images + annotations + classes/tags)
       const dsHandle = await getDsHandle();
-      if (dsHandle) await writeVersionFile(dsHandle, ver);
+      if (dsHandle) {
+        await createVersionSnapshot(dsHandle, ver, Array.from(validImageIds));
+      }
 
       const vs = await db.datasetVersions.where("datasetId").equals(datasetId).toArray();
       setVersions(vs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
@@ -115,7 +122,9 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
       setStep(1);
     } catch (err) {
       console.error("Failed to create version", err);
-      alert("Failed to create version");
+      alert("Failed to create version: " + err.message);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -322,8 +331,10 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
                     Ready to create version <strong>{name}</strong> with splits: Train {split.train}% / Val {split.val}% / Test {split.test}%.
                   </div>
                   <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-                    <Button variant="secondary" onClick={() => setStep(2)}>Back</Button>
-                    <Button onClick={createVersion}>Create Version</Button>
+                    <Button variant="secondary" onClick={() => setStep(2)} disabled={exporting}>Back</Button>
+                    <Button onClick={createVersion} disabled={exporting}>
+                      {exporting ? "Creating Snapshot..." : "Create Version"}
+                    </Button>
                   </div>
                 </div>
               )}

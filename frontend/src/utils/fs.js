@@ -254,27 +254,94 @@ export async function deleteJobFile(datasetHandle, jobId) {
 // Write version metadata inside /versions/
 export async function writeVersionFile(datasetHandle, version) {
   const versionsFolder = await datasetHandle.getDirectoryHandle("versions", { create: true });
-  const fh = await versionsFolder.getFileHandle(`${version.id}.json`, { create: true });
+  const vDir = await versionsFolder.getDirectoryHandle(version.id, { create: true });
+  const fh = await vDir.getFileHandle(`version.json`, { create: true });
   const writable = await fh.createWritable();
   await writable.write(JSON.stringify(version, null, 2));
   await writable.close();
 }
 
+/**
+ * createVersionSnapshot
+ * Copies raw images and active annotations into a versioned subfolder.
+ * Also snapshots current classes and tags into version.json.
+ */
+export async function createVersionSnapshot(datasetHandle, version, imageIds) {
+  if (!datasetHandle) return;
+  const versionsFolder = await datasetHandle.getDirectoryHandle("versions", { create: true });
+  const vDir = await versionsFolder.getDirectoryHandle(version.id, { create: true });
+
+  // 1. Snapshot metadata with classes & tags
+  const meta = (await readDatasetMetadata(datasetHandle)) || {};
+  const versionWithMetadata = {
+    ...version,
+    classes: meta.classes || [],
+    tags: meta.tags || [],
+  };
+  const mfh = await vDir.getFileHandle("version.json", { create: true });
+  const mw = await mfh.createWritable();
+  await mw.write(JSON.stringify(versionWithMetadata, null, 2));
+  await mw.close();
+
+  // 2. Copy Images
+  const srcImagesDir = await datasetHandle.getDirectoryHandle("images").catch(() => null);
+  const srcRawDir = srcImagesDir ? await srcImagesDir.getDirectoryHandle("raw").catch(() => null) : null;
+  if (srcRawDir) {
+    const destImagesDir = await vDir.getDirectoryHandle("images", { create: true });
+    const destRawDir = await destImagesDir.getDirectoryHandle("raw", { create: true });
+
+    for (const imageId of imageIds) {
+      // Find image record to get filename
+      const img = await db.images.get(imageId);
+      if (!img) continue;
+      try {
+        const srcFh = await srcRawDir.getFileHandle(img.name);
+        const destFh = await destRawDir.getFileHandle(img.name, { create: true });
+        const file = await srcFh.getFile();
+        const w = await destFh.createWritable();
+        await w.write(file);
+        await w.close();
+      } catch (e) { console.warn("Could not copy image for version:", img.name, e); }
+    }
+  }
+
+  // 3. Copy Annotations
+  const srcAnnsDir = await datasetHandle.getDirectoryHandle("annotations").catch(() => null);
+  const srcActiveDir = srcAnnsDir ? await srcAnnsDir.getDirectoryHandle("active").catch(() => null) : null;
+  if (srcActiveDir) {
+    const destAnnsDir = await vDir.getDirectoryHandle("annotations", { create: true });
+    // We put them in a flat folder inside the version directory for simplicity
+    for (const imageId of imageIds) {
+      try {
+        const srcFh = await srcActiveDir.getFileHandle(`${imageId}.json`);
+        const destFh = await destAnnsDir.getFileHandle(`${imageId}.json`, { create: true });
+        const file = await srcFh.getFile();
+        const w = await destFh.createWritable();
+        await w.write(file);
+        await w.close();
+      } catch (e) { /* skip if no annotation exists */ }
+    }
+  }
+}
+
 // Read version file
 export async function readVersionFile(datasetHandle, versionId) {
   const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
-  const fh = await versionsFolder.getFileHandle(`${versionId}.json`);
+  const vDir = await versionsFolder.getDirectoryHandle(versionId);
+  const fh = await vDir.getFileHandle(`version.json`);
   const file = await fh.getFile();
   return JSON.parse(await file.text());
 }
 
-// Delete version file
+// Delete version folder
 export async function deleteVersionFile(datasetHandle, versionId) {
   try {
     const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
-    await versionsFolder.removeEntry(`${versionId}.json`);
+    await versionsFolder.removeEntry(versionId, { recursive: true });
+    // Also try to delete legacy single-file version if it exists
+    await versionsFolder.removeEntry(`${versionId}.json`).catch(() => {});
   } catch (e) {
-    console.warn("Failed to delete version file", e);
+    console.warn("Failed to delete version folder", e);
   }
 }
 
@@ -287,17 +354,26 @@ export async function scanVersionsFromDatasetFolder(datasetHandle) {
   try {
     const versionsFolder = await datasetHandle.getDirectoryHandle("versions");
     for await (const entry of versionsFolder.values()) {
-      if (entry.kind === "file" && entry.name.endsWith(".json")) {
+      if (entry.kind === "directory") {
         try {
-          const file = await entry.getFile();
+          const vDir = await versionsFolder.getDirectoryHandle(entry.name);
+          const fh = await vDir.getFileHandle("version.json");
+          const file = await fh.getFile();
           const text = await file.text();
           const ver = JSON.parse(text);
           if (ver && ver.id) {
             versions.push(ver);
           }
-        } catch (err) {
-          console.warn("Failed to parse version file", entry.name, err);
-        }
+        } catch (err) { /* skip directory without version.json */ }
+      }
+      // Backward compatibility for old single-file versions
+      if (entry.kind === "file" && entry.name.endsWith(".json")) {
+        try {
+          const file = await entry.getFile();
+          const text = await file.text();
+          const ver = JSON.parse(text);
+          if (ver && ver.id) versions.push(ver);
+        } catch (err) { /* skip */ }
       }
     }
   } catch (err) {
