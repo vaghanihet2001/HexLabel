@@ -1206,6 +1206,8 @@ export default function Annotate() {
         return;
       }
 
+      if (dataset?.type === "classify") return;
+
       const imgRect = imageClientRect();
       if (!imgRect) return;
       if (e.clientX < imgRect.left || e.clientX > imgRect.right || e.clientY < imgRect.top || e.clientY > imgRect.bottom) return;
@@ -1413,6 +1415,7 @@ export default function Annotate() {
     };
 
     const onContext = (e) => {
+      if (dataset?.type === "classify") return;
       const d = stateRef.current.draw;
       if (d.inProgress && d.mode === "poly") {
         e.preventDefault();
@@ -1482,6 +1485,13 @@ export default function Annotate() {
       const isInputFocused = ["INPUT", "SELECT", "TEXTAREA"].includes(activeElement.tagName) || activeElement.isContentEditable;
 
       if (!isInputFocused) {
+        if (dataset?.type === "classify") {
+          const num = parseInt(ev.key);
+          if (!isNaN(num) && num > 0 && num <= classes.length) {
+            const cls = classes[num - 1];
+            if (cls) setClassification(cls.id);
+          }
+        }
         if (ev.key === "b" || ev.key === "B") setTool("bbox");
         if (ev.key === "p" || ev.key === "P") setTool("poly");
         if (ev.key === "a" || ev.key === "A" || ev.key === "ArrowLeft") {
@@ -1653,14 +1663,27 @@ export default function Annotate() {
     });
   };
 
+  const setClassification = (classId) => {
+    const cls = classes.find(c => c.id === classId);
+    if (!cls) return;
+    const ann = {
+      id: "image-class",
+      type: "class",
+      classId: cls.id,
+      name: cls.name,
+      color: cls.color
+    };
+    updateAnnotations([ann]);
+  };
+
   const handleNextImage = () => {
-    // Validation: Check for unclassified annotations
-    const unlabelled = annotations.some((a) => !a.classId);
+    const isClassify = dataset?.type === "classify";
+    const unlabelled = isClassify ? annotations.length === 0 : annotations.some((a) => !a.classId);
     if (unlabelled) {
       openModal({
         type: "error",
-        title: "Unclassified Annotations",
-        message: "Please assign a class to all annotations before moving to the next image.",
+        title: isClassify ? "Image Not Classified" : "Unclassified Annotations",
+        message: isClassify ? "Please select a class for this image." : "Please assign a class to all annotations before moving to the next image.",
       });
       return;
     }
@@ -1821,20 +1844,24 @@ export default function Annotate() {
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Button
-            variant={tool === "bbox" ? "primary" : "outline-secondary"}
-            size="sm"
-            onClick={() => setTool("bbox")}
-          >
-            <Square size={14} /> BBox
-          </Button>
-          <Button
-            variant={tool === "poly" ? "primary" : "outline-secondary"}
-            size="sm"
-            onClick={() => setTool("poly")}
-          >
-            <Triangle size={14} /> Polygon
-          </Button>
+          {dataset?.type !== "classify" && (
+            <>
+              <Button
+                variant={tool === "bbox" ? "primary" : "outline-secondary"}
+                size="sm"
+                onClick={() => setTool("bbox")}
+              >
+                <Square size={14} /> BBox
+              </Button>
+              <Button
+                variant={tool === "poly" ? "primary" : "outline-secondary"}
+                size="sm"
+                onClick={() => setTool("poly")}
+              >
+                <Triangle size={14} /> Polygon
+              </Button>
+            </>
+          )}
 
           <Button variant="outline-secondary" size="sm" onClick={() => {
             setZoom((z) => {
@@ -2025,35 +2052,35 @@ export default function Annotate() {
           {currentImage?.url ? (
             <>
               <div className="annotation-stage" style={{ transition: "transform 0.05s linear" }}>
-                <img
-                  ref={imageRef}
-                  src={currentImage.url}
-                  alt={currentImage.name}
-                  style={{
+                  <img
+                    ref={imageRef}
+                    src={currentImage.url}
+                    alt={currentImage.name}
+                    style={{
                     maxWidth: `100%`,
                     maxHeight: `85vh`,
                     objectFit: "contain",
-                    display: "block",
+                      display: "block",
                     transform: `translate(${panRef.current.x}px, ${panRef.current.y}px) scale(${zoom})`,
                     transformOrigin: "center center",
-                    userSelect: "none",
-                  }}
-                  onError={(e) => {
-                    console.warn(`Full image load failed in Annotate view for image: ${currentImage.name} (URL: ${currentImage.url})`);
-                  }}
-                  draggable={false}
-                />
-                <canvas
-                  ref={canvasRef}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: "100%",
-                    pointerEvents: "none",
-                  }}
-                />
+                      userSelect: "none",
+                    }}
+                    onError={(e) => {
+                      console.warn(`Full image load failed in Annotate view for image: ${currentImage.name} (URL: ${currentImage.url})`);
+                    }}
+                    draggable={false}
+                  />
+                  <canvas
+                    ref={canvasRef}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: "100%",
+                      pointerEvents: "none",
+                    }}
+                  />
                 <div
                   style={{
                     position: "absolute",
@@ -2097,7 +2124,7 @@ export default function Annotate() {
           )}
         </div>
 
-        <div className="image-annotation-right-panel" style={{ position: "relative" }}>
+        <div className="image-annotation-right-panel" style={{ position: "relative", height: "100%" }}>
           <div style={{
             position: "absolute",
             top: 10,
@@ -2120,7 +2147,7 @@ export default function Annotate() {
               style={{
                 width: 300,
                 height: "100%",
-                borderRight: `1px solid ${themeColors.border}`,
+                borderLeft: `1px solid ${themeColors.border}`,
                 background: themeColors.sidebarBg,
                 padding: 8,
                 display: "flex",
@@ -2129,120 +2156,178 @@ export default function Annotate() {
                 position: "relative",
               }}
             >
-              {/* 1. Classes Section (Fixed at Top) */}
-              <div style={{ marginBottom: 8, flexShrink: 0 }}>
-                <h6 style={{ marginBottom: 8 }}>Classes</h6>
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <InputGroup>
-                    <Form.Control
-                      ref={classInputRef}
-                      size="sm"
-                      placeholder="New class name"
-                      value={newClassName}
-                      onChange={(e) => setNewClassName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
-                    />
-                    <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
-                  </InputGroup>
+              {dataset?.type === "classify" ? (
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                  <div style={{ marginBottom: 8, flexShrink: 0 }}>
+                    <h6 style={{ marginBottom: 12 }}>Image Classification</h6>
+                    {classes.length === 0 ? (
+                      <div className="text-center p-4" style={{ opacity: 0.5 }}>
+                        No classes defined.
+                      </div>
+                    ) : (
+                      <div className="d-flex flex-column gap-2 overflow-auto mb-3" style={{ maxHeight: "40vh" }}>
+                        {classes.map((cls, idx) => {
+                          const isSelected = annotations.some(a => a.type === 'class' && a.classId === cls.id);
+                          return (
+                            <Button
+                              key={cls.id}
+                              variant={isSelected ? "primary" : "outline-secondary"}
+                              className="w-100 text-start d-flex align-items-center justify-content-between p-2"
+                              style={{ 
+                                background: isSelected ? cls.color : 'transparent',
+                                borderColor: isSelected ? cls.color : themeColors.border,
+                                color: isSelected ? '#fff' : themeColors.text
+                              }}
+                              onClick={() => setClassification(cls.id)}
+                            >
+                              <div className="d-flex align-items-center overflow-hidden">
+                                <div className="me-2" style={{ width: 12, height: 12, borderRadius: '2px', background: isSelected ? '#fff' : cls.color }}></div>
+                                <span className="text-truncate">{cls.name}</span>
+                              </div>
+                              <Badge bg={isSelected ? "light" : "secondary"} text={isSelected ? "dark" : "light"}>
+                                {idx < 9 ? idx + 1 : ""}
+                              </Badge>
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    
+                    <hr />
+                    <h6 className="mt-2 text-muted" style={{ fontSize: "0.85rem" }}>Add Class</h6>
+                    <InputGroup>
+                      <Form.Control
+                        ref={classInputRef}
+                        size="sm"
+                        placeholder="Class name..."
+                        value={newClassName}
+                        onChange={(e) => setNewClassName(e.target.value)}
+                        onFocus={() => { stateRef.current.isInputFocused = true; }}
+                        onBlur={() => { stateRef.current.isInputFocused = false; }}
+                        onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
+                      />
+                      <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
+                    </InputGroup>
+                  </div>
                 </div>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
-                  {classes.map((c) => (
-                    <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
-                        <div>{c.name}</div>
-                      </div>
-                      <div>
-                        <Button
+              ) : (
+                <>
+                  {/* 1. Classes Section (Fixed at Top) */}
+                  <div style={{ marginBottom: 8, flexShrink: 0 }}>
+                    <h6 style={{ marginBottom: 8 }}>Classes</h6>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <InputGroup>
+                        <Form.Control
+                          ref={classInputRef}
                           size="sm"
-                          variant="outline-secondary"
-                          onClick={() => {
-                            if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.id);
-                          }}
-                        >
-                          Assign
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={defaultClassId === c.id ? "primary" : "outline-secondary"}
-                          onClick={() => setDefaultClassId(c.id)}
-                          title="Set as default class for new annotations"
-                        >
-                          {defaultClassId === c.id ? "Default" : "Set Default"}
-                        </Button>
-                      </div>
+                          placeholder="New class name"
+                          value={newClassName}
+                          onChange={(e) => setNewClassName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") addClass(); }}
+                        />
+                        <Button variant="primary" size="sm" onClick={addClass}>Add</Button>
+                      </InputGroup>
                     </div>
-                  ))}
-                </div>
-              </div>
 
-              <hr />
-
-              {/* 2. Annotations List (Scrollable) */}
-              <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                  <h6 style={{ margin: 0 }}>Annotations</h6>
-                  <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
-                </div>
-
-                <div style={{ width: '100%' }}>
-                  {annotations.length === 0 ? (
-                    <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
-                  ) : (
-                    <ListGroup>
-                      {annotations.map((a) => (
-                        <ListGroup.Item
-                          key={a.id}
-                          active={a.id === selectedAnnId}
-                          onClick={() => setSelectedAnnId(a.id)}
-                          style={{
-                            display: "flex",
-                            gap: 8,
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            color: themeColors.text,
-                            backgroundColor: themeColors.cardBg,
-                            border: `1px solid ${themeColors.border}`,
-                          }}
-                        >
-                          <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                            {(() => {
-                              const cls = classes.find(c => c.id === a.classId);
-                              return <div style={{ width: 14, height: 14, background: cls?.color || a._legacyColor || "#888", borderRadius: 3, flexShrink: 0 }} />;
-                            })()}
-                            <div style={{ flex: 1 }}>
-                              <Form.Select
-                                size="sm"
-                                value={a.classId || ""}
-                                onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
-                              >
-                                {!a.classId && (
-                                  <option value="" disabled>— Unclassified —</option>
-                                )}
-                                {classes.map((c) => (
-                                  <option key={c.id} value={c.id}>
-                                    {c.name}
-                                  </option>
-                                ))}
-                              </Form.Select>
-                            </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
+                      {classes.map((c) => (
+                        <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <div style={{ width: 14, height: 14, background: c.color, borderRadius: 3 }} />
+                            <div>{c.name}</div>
                           </div>
-
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
-                              {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                          <div>
+                            <Button
+                              size="sm"
+                              variant="outline-secondary"
+                              onClick={() => {
+                                if (selectedAnnId) updateAnnotationClass(selectedAnnId, c.id);
+                              }}
+                            >
+                              Assign
                             </Button>
-                            <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
-                              <Trash2 size={14} />
+                            <Button
+                              size="sm"
+                              variant={defaultClassId === c.id ? "primary" : "outline-secondary"}
+                              onClick={() => setDefaultClassId(c.id)}
+                              title="Set as default class for new annotations"
+                            >
+                              {defaultClassId === c.id ? "Default" : "Set Default"}
                             </Button>
                           </div>
-                        </ListGroup.Item>
+                        </div>
                       ))}
-                    </ListGroup>
-                  )}
-                </div>
-              </div>
+                    </div>
+                  </div>
+
+                  <hr />
+
+                  {/* 2. Annotations List (Scrollable) */}
+                  <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <h6 style={{ margin: 0 }}>Annotations</h6>
+                      <small style={{ color: themeColors.subtleText }}>{annotations.length}</small>
+                    </div>
+
+                    <div style={{ width: '100%' }}>
+                      {annotations.length === 0 ? (
+                        <div style={{ color: themeColors.subtleText }}>No annotations yet.</div>
+                      ) : (
+                        <ListGroup>
+                          {annotations.map((a) => (
+                            <ListGroup.Item
+                              key={a.id}
+                              active={a.id === selectedAnnId}
+                              onClick={() => setSelectedAnnId(a.id)}
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                color: themeColors.text,
+                                backgroundColor: themeColors.cardBg,
+                                border: `1px solid ${themeColors.border}`,
+                              }}
+                            >
+                              <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                                {(() => {
+                                  const cls = classes.find(c => c.id === a.classId);
+                                  return <div style={{ width: 14, height: 14, background: cls?.color || a._legacyColor || "#888", borderRadius: 3, flexShrink: 0 }} />;
+                                })()}
+                                <div style={{ flex: 1 }}>
+                                  <Form.Select
+                                    size="sm"
+                                    value={a.classId || ""}
+                                    onChange={(e) => updateAnnotationClass(a.id, e.target.value)}
+                                  >
+                                    {!a.classId && (
+                                      <option value="" disabled>— Unclassified —</option>
+                                    )}
+                                    {classes.map((c) => (
+                                      <option key={c.id} value={c.id}>
+                                        {c.name}
+                                      </option>
+                                    ))}
+                                  </Form.Select>
+                                </div>
+                              </div>
+
+                              <div style={{ display: "flex", gap: 6 }}>
+                                <Button size="sm" variant="outline-secondary" onClick={() => toggleAnnotationVisible(a.id)}>
+                                  {a.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
+                                </Button>
+                                <Button size="sm" variant="outline-danger" onClick={() => deleteAnnotation(a.id)}>
+                                  <Trash2 size={14} />
+                                </Button>
+                              </div>
+                            </ListGroup.Item>
+                          ))}
+                        </ListGroup>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
 
               {/* 3. Footer Info (Optional, removed buttons) */}
               <div style={{ marginTop: 8, borderTop: `1px solid ${themeColors.border}`, paddingTop: 8, textAlign: "center", color: themeColors.subtleText }}>

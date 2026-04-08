@@ -19,7 +19,7 @@ export default function Sidebar() {
   const navItems = [
     { path: "/", label: "Dashboard", icon: <Layers size={18} /> },
     { path: "/projects", label: "Projects", icon: <Folder size={18} /> },
-    { path: "/annotate", label: "Annotate", icon: <PenTool size={18} /> },
+    // { path: "/annotate", label: "Annotate", icon: <PenTool size={18} /> },
     { path: "/settings", label: "Settings", icon: <Settings size={18} /> },
   ];
 

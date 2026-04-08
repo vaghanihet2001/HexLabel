@@ -31,24 +31,13 @@ export default function Dashboard() {
   useEffect(() => {
     async function loadStats() {
       try {
-        const projects = await db.projects.count();
-        const datasets = await db.datasets.count();
-        const images = await db.images.count();
-        const annotations = await db.annotations.count();
-        const jobs = await db.jobs.count();
+        const projectsCount = await db.projects.count();
+        const datasets = await db.datasets.toArray();
+        const imagesCount = await db.images.count();
+        const annotationsCount = await db.annotations.count();
+        const versionsCount = await db.datasetVersions.count();
 
-        // Storage estimation (IndexedDB blobs aren't easy to size)
-        // → so approximate by number of images × 1.5MB avg
-        const estimatedBytes = images * 1.5 * 1024 * 1024;
-        const storageUsed =
-          (estimatedBytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
-        const storagePercent = Math.min(
-          Math.round((estimatedBytes / (5 * 1024 * 1024 * 1024)) * 100),
-          100
-        ); // assume 5GB local limit
-
-        // Build category stats by reading annotation types
-        const annotationRows = await db.annotations.toArray();
+        // 1. Build category stats by looking at Dataset types (much faster and more reliable)
         const categoriesCount = {
           Detection: 0,
           Segmentation: 0,
@@ -56,10 +45,17 @@ export default function Dashboard() {
           Keypoints: 0,
         };
 
-        annotationRows.forEach((a) => {
-          const type = a?.data?.type;
-          if (type && categoriesCount[type] !== undefined) {
-            categoriesCount[type]++;
+        datasets.forEach(ds => {
+          let label = "";
+          if (ds.type === "detect") label = "Detection";
+          else if (ds.type === "segment") label = "Segmentation";
+          else if (ds.type === "classify") label = "Classification";
+          else if (ds.type === "keypoint") label = "Keypoints";
+
+          if (label && categoriesCount[label] !== undefined) {
+             // For simplicity, we count datasets of this type, 
+             // or we could count images within these datasets for more precision.
+             categoriesCount[label]++;
           }
         });
 
@@ -68,36 +64,38 @@ export default function Dashboard() {
           count: categoriesCount[key],
         }));
 
-        // No activity table in schema → generate fallback from timestamps
+        // 2. Real Storage Tracking (using Browser API)
+        let storageUsed = "0 GB";
+        let storagePercent = 0;
+        
+        if (navigator.storage && navigator.storage.estimate) {
+          const estimate = await navigator.storage.estimate();
+          // estimate.usage is in bytes
+          const usedGB = (estimate.usage / (1024 * 1024 * 1024)).toFixed(2);
+          const quotaGB = (estimate.quota / (1024 * 1024 * 1024)).toFixed(1);
+          storageUsed = `${usedGB} / ${quotaGB} GB`;
+          storagePercent = Math.min(Math.round((estimate.usage / estimate.quota) * 100), 100);
+        } else {
+          // Fallback heuristic if API unavailable
+          const estimatedBytes = imagesCount * 1.5 * 1024 * 1024;
+          storageUsed = (estimatedBytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+          storagePercent = Math.min(Math.round((estimatedBytes / (5 * 1024 * 1024 * 1024)) * 100), 100);
+        }
+
+        // 3. Activity
         const recentActivity = [
-          {
-            id: 1,
-            text: `You have ${projects} project(s)`,
-            time: "now",
-          },
-          {
-            id: 2,
-            text: `${datasets} datasets present`,
-            time: "now",
-          },
-          {
-            id: 3,
-            text: `${images} images imported`,
-            time: "now",
-          },
-          {
-            id: 4,
-            text: `${annotations} annotations created`,
-            time: "now",
-          },
+          { id: 1, text: `Active Projects: ${projectsCount}`, time: "Live" },
+          { id: 2, text: `Snapshot Versions: ${versionsCount}`, time: "Live" },
+          { id: 3, text: `Total Active Images: ${imagesCount}`, time: "Live" },
+          { id: 4, text: `Total Active Annotations: ${annotationsCount}`, time: "Live" },
         ];
 
         setStats({
-          projects,
-          datasets,
-          images,
-          jobs,
-          annotations,
+          projects: projectsCount,
+          datasets: datasets.length,
+          images: imagesCount,
+          annotations: annotationsCount,
+          versions: versionsCount,
           storageUsed,
           storagePercent,
           categories,
@@ -141,7 +139,7 @@ export default function Dashboard() {
       <p style={{ opacity: 0.8 }}>Overview of your annotation workspace</p>
 
       {/* Summary cards */}
-      <Row xs={1} sm={2} md={3} className="g-4 mt-2">
+      <Row xs={1} sm={2} md={4} className="g-4 mt-2">
         <Col>
           <Card
             style={cardStyle}
@@ -169,13 +167,26 @@ export default function Dashboard() {
         </Col>
 
         <Col>
+          <Card
+            style={cardStyle}
+            className="p-3 d-flex flex-row align-items-center"
+          >
+            <Activity size={36} className="me-3" color={themeColors.text} />
+            <div>
+              <h5 className="mb-1">{stats.versions}</h5>
+              <small>Versions</small>
+            </div>
+          </Card>
+        </Col>
+
+        <Col>
           <Card style={cardStyle} className="p-3">
             <div className="d-flex justify-content-between align-items-center mb-2">
               <div className="d-flex align-items-center">
                 <HardDrive size={28} className="me-2" color={themeColors.text} />
                 <div>
-                  <h6 className="mb-0">Storage</h6>
-                  <small>{stats.storageUsed} estimated</small>
+                  <h6 className="mb-0">Browser Storage</h6>
+                  <small>{stats.storageUsed}</small>
                 </div>
               </div>
               <span>{stats.storagePercent}%</span>

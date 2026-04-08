@@ -67,6 +67,7 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
 
       if (ds?.type === "segment") setExportFormat("yolo-segment");
       else if (ds?.type === "detect") setExportFormat("yolo-hbb");
+      else if (ds?.type === "classify") setExportFormat("yolo-cls");
 
     })();
   }, [datasetId]);
@@ -382,14 +383,14 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
       {/* AppModal for Delete Confirmation */}
       <AppModal
         show={showDeleteModal}
-        onHide={() => setShowDeleteModal(false)}
+        onClose={() => setShowDeleteModal(false)}
         title="Delete Version?"
         confirmText="Delete"
         confirmVariant="danger"
+        type="confirm"
         onConfirm={confirmDelete}
-      >
-        <p>Are you sure you want to delete this version configuration? This action cannot be undone.</p>
-      </AppModal>
+        message="Are you sure you want to delete this version configuration? This action cannot be undone."
+      />
 
       <AppModal
         show={showExportModal}
@@ -407,9 +408,9 @@ export default function VersionsPage({ datasetId: propDatasetId }) {
                 <option key={fmt.value} value={fmt.value}>{fmt.label}</option>
               ))}
             </Form.Select>
-            <Form.Text className="text-muted" style={{ display: 'block', marginTop: 8 }}>
+            <div style={{ display: 'block', marginTop: 8, fontSize: '0.875em', color: tc.subtleText }}>
               {EXPORT_FORMATS.find(f => f.value === exportFormat)?.description}
-            </Form.Text>
+            </div>
           </Form.Group>
         }
       />

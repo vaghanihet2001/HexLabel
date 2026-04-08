@@ -299,7 +299,11 @@ export default function ClassesTagsPage() {
         </div>
       )}
 
-      <Tabs defaultActiveKey="classes" className="mb-3">
+      <Tabs 
+        defaultActiveKey="classes" 
+        className="custom-hex-tabs mb-3"
+        style={{ borderBottom: `1px solid ${themeColors?.border}` }}
+      >
 
         {/* ================================================================
             TAB: CLASSES

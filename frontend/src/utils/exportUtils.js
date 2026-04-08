@@ -8,6 +8,11 @@ import { readDatasetClasses } from "./fs";
  */
 export const EXPORT_FORMATS = [
     {
+        value: "yolo-cls",
+        label: "YOLO Classification",
+        description: "YOLO format for image classification (folder per class: train/class_name/img.jpg)."
+    },
+    {
         value: "yolo-hbb",
         label: "YOLO Bounding Box (HBB)",
         description: "Standard YOLO format for object detection (class xc yc w h)."
@@ -23,6 +28,7 @@ export const EXPORT_FORMATS = [
  * Export Registry
  */
 const exporters = {
+    "yolo-cls": exportYoloCls,
     "yolo-hbb": exportYoloHbb,
     "yolo-segment": exportYoloSegment,
 };
@@ -366,3 +372,90 @@ async function processImages(ctx, formatAnnotationFn) {
 
 // Backward compatibility wrapper if needed, or just replace usage
 export const exportVersionToYolo = (v, d, p) => exportDatasetVersion(v, d, p, "yolo-hbb");
+
+/**
+ * YOLO Classification Exporter (Folder-based structure)
+ */
+async function exportYoloCls(ctx) {
+    const { zip, images, version, annMap, dsHandle } = ctx;
+
+    const shuffled = [...images].sort(() => Math.random() - 0.5);
+    const total = shuffled.length;
+    
+    let nTrain = Math.floor(total * (version.splits.train / 100));
+    let nVal = Math.floor(total * (version.splits.val / 100));
+    
+    // Fix remainder spillage into 'test' if test is set to 0%
+    if (version.splits.test === 0 || !version.splits.test) {
+        if (total - nTrain - nVal > 0) {
+            nTrain += (total - nTrain - nVal); // dump remaining into train
+        }
+    }
+    const nTest = total - nTrain - nVal;
+
+    // Pre-create all folders for all classes so YOLO-CLS doesn't break if a class is unrepresented in a split
+    const activeSplits = [];
+    if (nTrain > 0) activeSplits.push("train");
+    if (nVal > 0) activeSplits.push("val");
+    if (nTest > 0) activeSplits.push("test");
+
+    const allClassNames = [...ctx.classes];
+    activeSplits.forEach(split => {
+        allClassNames.forEach(cls => {
+            zip.folder(split).folder(cls);
+        });
+    });
+
+    for (let i = 0; i < total; i++) {
+        const img = shuffled[i];
+        let split = "train";
+        if (i < nTrain) split = "train";
+        else if (i < nTrain + nVal) split = "val";
+        else split = "test";
+
+        const anns = annMap.get(img.id) || [];
+        const classAnns = anns.filter(a => a.type === "class");
+        
+        if (classAnns.length === 0 || !classAnns[0].classId) {
+            continue; // Skip images with no classification label
+        }
+
+        let className = "unclassified";
+        const classId = classAnns[0].classId;
+        const clsIdx = ctx.classToIndex.get(classId);
+        if (clsIdx !== undefined && ctx.classes[clsIdx]) {
+            className = ctx.classes[clsIdx];
+        } else if (classAnns[0].name) {
+            className = classAnns[0].name;
+        } else {
+            continue; // Skip if class metadata is entirely lost
+        }
+
+        const targetFolder = zip.folder(split).folder(className);
+
+        let blob = null;
+        if (img.file instanceof Blob) {
+            blob = img.file;
+        } else if (ctx.imageSourceDir) {
+            try {
+                const fh = await ctx.imageSourceDir.getFileHandle(img.name);
+                blob = await fh.getFile();
+            } catch (e) {
+                console.warn("[export] Missing image in version folder:", img.name);
+            }
+        } else if (dsHandle) {
+            try {
+                const imagesDir = await dsHandle.getDirectoryHandle("images");
+                const rawDir = await imagesDir.getDirectoryHandle("raw");
+                const fh = await rawDir.getFileHandle(img.name);
+                blob = await fh.getFile();
+            } catch (e) {
+                console.warn("[export] Missing image file in root raw folder:", img.name);
+            }
+        }
+
+        if (blob) {
+            targetFolder.file(img.name, blob);
+        }
+    }
+}
