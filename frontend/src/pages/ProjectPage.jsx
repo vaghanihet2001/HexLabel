@@ -10,8 +10,9 @@ import {
   Tooltip,
   Form,
 } from "react-bootstrap";
-import { Database, FolderOpen, Plus, Trash2, Lock } from "lucide-react";
+import { Database, FolderOpen, Plus, Trash2, Lock, Edit } from "lucide-react";
 import { useTheme } from "../components/ThemeContext";
+import { resizeImageFile } from "../utils/imageUtils";
 import AppModal from "../components/AppModal";
 import { db, generateId } from "../utils/db";
 import * as fsUtils from "../utils/fs";
@@ -51,10 +52,39 @@ export default function ProjectPage() {
   const closeModal = () => setModal((prev) => ({ ...prev, show: false, onConfirm: null }));
 
   const [showAdd, setShowAdd] = useState(false);
+  const [editDatasetId, setEditDatasetId] = useState(null);
   const [newDatasetName, setNewDatasetName] = useState("");
   const [newDatasetType, setNewDatasetType] = useState("detect");
   const [newDatasetDescription, setNewDatasetDescription] = useState("");
+  const [newDatasetCover, setNewDatasetCover] = useState(null);
   const [hasPermission, setHasPermission] = useState(true);
+
+  // Helper to fetch datasets and inject fallback images
+  const fetchDatasetsWithImages = async (pid) => {
+    const sets = await db.datasets.where("projectId").equals(pid).toArray();
+    return await Promise.all(
+      sets.map(async (ds) => {
+        let defaultImage = ds.coverImage;
+        if (!defaultImage) {
+          const firstImg = await db.images.where("datasetId").equals(ds.id).first();
+          if (firstImg) {
+            if (firstImg.url && !firstImg.url.startsWith("blob:")) {
+              defaultImage = firstImg.url;
+            } else if (ds.folderHandle) {
+              try {
+                const imagesDir = await ds.folderHandle.getDirectoryHandle("images");
+                const rawDir = await imagesDir.getDirectoryHandle("raw");
+                const fh = await rawDir.getFileHandle(firstImg.name);
+                const file = await fh.getFile();
+                defaultImage = URL.createObjectURL(file);
+              } catch (e) {}
+            }
+          }
+        }
+        return { ...ds, defaultImage };
+      })
+    );
+  };
 
   // load project and datasets (from DB or disk)
   useEffect(() => {
@@ -70,13 +100,7 @@ export default function ProjectPage() {
       if (proj.folderHandle) {
         try {
           await fsUtils.syncProjectToIndexedDB(proj.folderHandle, true);
-          const sets = await db.datasets.where("projectId").equals(projectId).toArray();
-          setDatasets(sets);
-        } catch (err) {
-          // fallback to DB datasets
-          const sets = await db.datasets.where("projectId").equals(projectId).toArray();
-          setDatasets(sets);
-        }
+        } catch (err) {}
 
         try {
           const state = await proj.folderHandle.queryPermission({ mode: "readwrite" });
@@ -85,10 +109,10 @@ export default function ProjectPage() {
           setHasPermission(false);
         }
       } else {
-        const sets = await db.datasets.where("projectId").equals(projectId).toArray();
-        setDatasets(sets);
         setHasPermission(false);
       }
+
+      setDatasets(await fetchDatasetsWithImages(projectId));
     };
     load();
   }, [projectId]);
@@ -111,7 +135,27 @@ export default function ProjectPage() {
     }
   };
 
-  // add dataset
+  // open add modal
+  const openAddModal = () => {
+    setEditDatasetId(null);
+    setNewDatasetName("");
+    setNewDatasetType("detect");
+    setNewDatasetDescription("");
+    setNewDatasetCover(null);
+    setShowAdd(true);
+  };
+
+  // open edit modal
+  const openEditModal = (ds) => {
+    setEditDatasetId(ds.id);
+    setNewDatasetName(ds.name);
+    setNewDatasetType(ds.type || "detect");
+    setNewDatasetDescription(ds.description || "");
+    setNewDatasetCover(ds.coverImage || null);
+    setShowAdd(true);
+  };
+
+  // add or edit dataset
   const handleAddDataset = async () => {
     if (!newDatasetName.trim()) {
       return openModal({
@@ -143,12 +187,52 @@ export default function ProjectPage() {
     }
 
     try {
+      if (editDatasetId) {
+        // Editing existing dataset
+        const existing = await db.datasets.get(editDatasetId);
+        if (!existing) return;
+
+        const updatedMeta = {
+          ...existing,
+          name: newDatasetName,
+          description: newDatasetDescription,
+          type: newDatasetType,
+          coverImage: newDatasetCover,
+        };
+
+        await db.datasets.put(updatedMeta);
+
+        if (project.folderHandle) {
+          try {
+            await fsUtils.addDatasetToProjectMeta(project.folderHandle, {
+              id: updatedMeta.id,
+              name: updatedMeta.name,
+              description: updatedMeta.description,
+              type: updatedMeta.type,
+              coverImage: updatedMeta.coverImage || null,
+              createdAt: updatedMeta.createdAt,
+              imageCount: updatedMeta.imageCount || 0,
+            });
+
+            // Also update dataset.json
+            const dsDir = await project.folderHandle.getDirectoryHandle(updatedMeta.name);
+            await fsUtils.writeDatasetMetadata(dsDir, updatedMeta);
+          } catch (e) {}
+        }
+
+        setDatasets(await fetchDatasetsWithImages(projectId));
+        setShowAdd(false);
+        return;
+      }
+
+      // Adding new dataset
       const datasetId = generateId();
       const datasetMeta = {
         id: datasetId,
         name: newDatasetName,
         description: newDatasetDescription || "",
         type: newDatasetType || "detect",
+        coverImage: newDatasetCover || null,
         projectId: projectId,
         createdAt: new Date().toISOString(),
         imageCount: 0,
@@ -164,6 +248,7 @@ export default function ProjectPage() {
         name: datasetMeta.name,
         description: datasetMeta.description,
         type: datasetMeta.type,
+        coverImage: datasetMeta.coverImage || null,
         createdAt: datasetMeta.createdAt,
         imageCount: 0,
       });
@@ -174,8 +259,7 @@ export default function ProjectPage() {
         folderHandle: await project.folderHandle.getDirectoryHandle(newDatasetName),
       });
 
-      const updated = await db.datasets.where("projectId").equals(projectId).toArray();
-      setDatasets(updated);
+      setDatasets(await fetchDatasetsWithImages(projectId));
 
       openModal({
         type: "success",
@@ -188,6 +272,7 @@ export default function ProjectPage() {
       setNewDatasetName("");
       setNewDatasetDescription("");
       setNewDatasetType("detect");
+      setNewDatasetCover(null);
 
     } catch (err) {
       console.error("Failed to create dataset:", err);
@@ -236,8 +321,7 @@ export default function ProjectPage() {
           }
 
           // refresh UI
-          const updated = await db.datasets.where("projectId").equals(projectId).toArray();
-          setDatasets(updated);
+          setDatasets(await fetchDatasetsWithImages(projectId));
           return true;
         } catch (err) {
           openModal({ type: "error", title: "Delete Failed", message: "Could not delete dataset." });
@@ -252,6 +336,16 @@ export default function ProjectPage() {
 
   return (
     <div className="p-4">
+      <style>{`
+        .hover-card {
+          transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out !important;
+          cursor: pointer;
+        }
+        .hover-card:hover {
+          transform: translateY(-5px);
+          box-shadow: 0 10px 20px rgba(0,0,0,0.15) !important;
+        }
+      `}</style>
       {/* Global AppModal */}
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
 
@@ -263,7 +357,7 @@ export default function ProjectPage() {
         </div>
 
         {hasPermission ? (
-          <Button variant="primary" onClick={() => setShowAdd(true)}><Plus size={16} className="me-1" /> Add Dataset</Button>
+          <Button variant="primary" onClick={openAddModal}><Plus size={16} className="me-1" /> Add Dataset</Button>
         ) : (
           <Button variant="warning" onClick={handleGrantPermission}><Lock size={16} className="me-1" /> Grant Folder Access</Button>
         )}
@@ -278,10 +372,26 @@ export default function ProjectPage() {
         <Row xs={1} sm={2} md={3} lg={4} className="g-4">
           {datasets.map((ds) => (
             <Col key={ds.id}>
-              <Card className="p-2 h-100" style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}>
-                <div className="d-flex align-items-center justify-content-center" style={{ height: 140, background: themeColors.toolbarBg, borderRadius: 10 }}>
-                  <FolderOpen size={20} />
-                </div>
+              <Card 
+                className="p-2 h-100 shadow-sm hover-card" 
+                style={{ backgroundColor: themeColors.cardBg, color: themeColors.text }}
+                onDoubleClick={() => navigate(`/project/${projectId}/dataset/${ds.id}`)}
+              >
+                {ds.defaultImage ? (
+                  <div
+                    style={{
+                      height: 140,
+                      borderRadius: "10px 10px 0 0",
+                      backgroundImage: `url(${ds.defaultImage})`,
+                      backgroundSize: "cover",
+                      backgroundPosition: "center",
+                    }}
+                  />
+                ) : (
+                  <div className="d-flex align-items-center justify-content-center" style={{ height: 140, background: themeColors.toolbarBg, borderRadius: "10px 10px 0 0" }}>
+                    <FolderOpen size={20} />
+                  </div>
+                )}
 
                 <Card.Body>
                   <h5 className="mb-1">{ds.name}</h5>
@@ -289,8 +399,8 @@ export default function ProjectPage() {
                   <p className="small" style={{ color: themeColors.subtleText }}>{ds.createdAt ? new Date(ds.createdAt).toLocaleString() : ""}</p>
 
                   <div className="d-flex justify-content-between">
-                    <Button size="sm" variant="outline-primary" onClick={() => navigate(`/project/${projectId}/dataset/${ds.id}`)}><Database size={14} /></Button>
-                    <Button size="sm" variant="outline-danger" onClick={() => openDeleteDatasetModal(ds)}><Trash2 size={14} /></Button>
+                    <Button size="sm" variant="outline-secondary" onClick={(e) => { e.stopPropagation(); openEditModal(ds); }}><Edit size={14} /></Button>
+                    <Button size="sm" variant="outline-danger" onClick={(e) => { e.stopPropagation(); openDeleteDatasetModal(ds); }}><Trash2 size={14} /></Button>
                   </div>
                 </Card.Body>
               </Card>
@@ -304,9 +414,9 @@ export default function ProjectPage() {
         <AppModal
           show={showAdd}
           onClose={() => setShowAdd(false)}
-          title="Create Dataset"
+          title={editDatasetId ? "Edit Dataset" : "Create Dataset"}
           type="confirm"
-          confirmText="Create"
+          confirmText={editDatasetId ? "Save" : "Create"}
           cancelText="Cancel"
           onConfirm={handleAddDataset}
           autoClose={false}
@@ -323,9 +433,33 @@ export default function ProjectPage() {
                 <Form.Control as="textarea" rows={2} value={newDatasetDescription} onChange={(e) => setNewDatasetDescription(e.target.value)} />
               </Form.Group>
 
+              <Form.Group className="mb-2">
+                <Form.Label>Cover Image (Optional)</Form.Label>
+                <Form.Control
+                  type="file"
+                  accept="image/*"
+                  onChange={async (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                      try {
+                        const base64 = await resizeImageFile(file);
+                        setNewDatasetCover(base64);
+                      } catch (err) {
+                        console.error(err);
+                      }
+                    }
+                  }}
+                />
+                {newDatasetCover && (
+                  <div className="mt-2">
+                    <img src={newDatasetCover} style={{ height: 60, borderRadius: 5, objectFit: "cover" }} alt="preview" />
+                  </div>
+                )}
+              </Form.Group>
+
               <Form.Group>
                 <Form.Label>Type</Form.Label>
-                <Form.Select value={newDatasetType} onChange={(e) => setNewDatasetType(e.target.value)}>
+                <Form.Select value={newDatasetType} onChange={(e) => setNewDatasetType(e.target.value)} disabled={!!editDatasetId}>
                   <option value="detect">Detection</option>
                   <option value="segment">Segmentation</option>
                   <option value="obb">OBB</option>

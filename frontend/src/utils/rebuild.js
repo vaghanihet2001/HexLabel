@@ -31,6 +31,7 @@ export async function rebuildDatabaseFromProject(projectFolderHandle) {
     name: projectMeta.name || projectFolderHandle.name,
     description: projectMeta.description || "",
     folderHandle: projectFolderHandle,
+    coverImage: projectMeta.coverImage || null,
     createdAt: projectMeta.createdAt || new Date().toISOString(),
   };
 
@@ -90,6 +91,7 @@ async function rebuildDataset(datasetFolderHandle, projectId) {
     type: datasetMeta.type || "detect",
     projectId,
     folderHandle: datasetFolderHandle,
+    coverImage: datasetMeta.coverImage || null,
     createdAt: datasetMeta.createdAt || new Date().toISOString(),
   };
 
@@ -125,6 +127,7 @@ async function rebuildImages(datasetFolder, datasetId) {
         path: `images/raw/${entry.name}`,
         createdAt: new Date().toISOString(),
         jobId: null, // updated later
+        url: URL.createObjectURL(file),
       });
     }
 

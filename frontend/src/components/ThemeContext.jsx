@@ -62,14 +62,11 @@ export const darkTheme = {
 const ThemeContext = createContext();
 
 export const ThemeProvider = ({ children }) => {
-  const [theme, setTheme] = useState("dark");
-  const themeColors = theme === "light" ? lightTheme : darkTheme;
-
-  // Load saved theme
-  useEffect(() => {
+  const [theme, setTheme] = useState(() => {
     const saved = localStorage.getItem("app-theme");
-    if (saved) setTheme(saved);
-  }, []);
+    return saved ? saved : "dark";
+  });
+  const themeColors = theme === "light" ? lightTheme : darkTheme;
 
   // Save theme
   useEffect(() => {

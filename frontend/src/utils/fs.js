@@ -198,6 +198,7 @@ export async function syncProjectToIndexedDB(projectFolderHandle, upsertProject 
     datasets: projectMeta.datasets?.length || 0,
     models: projectMeta.models || 0,
     folderHandle: projectFolderHandle,
+    coverImage: projectMeta.coverImage || null,
     createdAt: projectMeta.createdAt || new Date().toISOString(),
   };
 
@@ -215,6 +216,7 @@ export async function syncProjectToIndexedDB(projectFolderHandle, upsertProject 
       type: ds.type || "detect",
       projectId: toStoreProject.id,
       folderHandle: projectFolderHandle ? await projectFolderHandle.getDirectoryHandle(ds.name).catch(() => null) : null,
+      coverImage: ds.coverImage || null,
       createdAt: ds.createdAt || new Date().toISOString(),
       imageCount: ds.imageCount || 0,
       annotationVersions: ds.annotationVersions || [],

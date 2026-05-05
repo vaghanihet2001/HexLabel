@@ -28,6 +28,7 @@ import {
 
 import { db } from "../utils/db";
 import { deleteProject } from "../utils/cleanup";
+import { resizeImageFile } from "../utils/imageUtils";
 
 // ⭐ NEW – DB REBUILD SCRIPT
 import { rebuildDatabaseFromProject } from "../utils/rebuild";
@@ -90,7 +91,28 @@ export default function Projects() {
           .equals(proj.id)
           .count();
 
-        return { ...proj, datasets: datasetCount };
+        let defaultImage = proj.coverImage;
+        if (!defaultImage) {
+          const firstDs = await db.datasets.where("projectId").equals(proj.id).first();
+          if (firstDs) {
+            const firstImg = await db.images.where("datasetId").equals(firstDs.id).first();
+            if (firstImg) {
+              if (firstImg.url && !firstImg.url.startsWith("blob:")) {
+                defaultImage = firstImg.url;
+              } else if (firstDs.folderHandle) {
+                try {
+                  const imagesDir = await firstDs.folderHandle.getDirectoryHandle("images");
+                  const rawDir = await imagesDir.getDirectoryHandle("raw");
+                  const fh = await rawDir.getFileHandle(firstImg.name);
+                  const file = await fh.getFile();
+                  defaultImage = URL.createObjectURL(file);
+                } catch (e) {}
+              }
+            }
+          }
+        }
+
+        return { ...proj, datasets: datasetCount, defaultImage };
       })
     );
 
@@ -137,6 +159,14 @@ export default function Projects() {
         { create: true }
       );
 
+      let existingDatasets = [];
+      try {
+        const fileData = await file.getFile();
+        const text = await fileData.text();
+        const parsed = JSON.parse(text);
+        if (parsed.datasets) existingDatasets = parsed.datasets;
+      } catch (e) {}
+
       const writable = await file.createWritable();
       await writable.write(
         JSON.stringify(
@@ -144,8 +174,9 @@ export default function Projects() {
             id: project.id,
             name: project.name,
             description: project.description,
+            coverImage: project.coverImage || null,
             createdAt: project.createdAt,
-            datasets: [],
+            datasets: existingDatasets,
           },
           null,
           2
@@ -194,6 +225,7 @@ export default function Projects() {
       datasets: currentProject.datasets || 0,
       models: currentProject.models || 0,
       folderHandle: fh,
+      coverImage: currentProject.coverImage || null,
       createdAt: currentProject.createdAt || new Date().toISOString(),
     };
 
@@ -325,6 +357,16 @@ export default function Projects() {
   // -----------------------------
   return (
     <div className="p-4">
+      <style>{`
+        .hover-card {
+          transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out !important;
+          cursor: pointer;
+        }
+        .hover-card:hover {
+          transform: translateY(-5px);
+          box-shadow: 0 10px 20px rgba(0,0,0,0.15) !important;
+        }
+      `}</style>
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
 
       {/* HEADER */}
@@ -359,17 +401,32 @@ export default function Projects() {
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
         {projects.map((project) => (
           <Col key={project.id}>
-            <Card className="p-2 h-100 shadow-sm">
-              <div
-                className="d-flex align-items-center justify-content-center"
-                style={{
-                  height: 140,
-                  borderRadius: 10,
-                  background: themeColors.toolbarBg,
-                }}
-              >
-                <FolderOpen size={28} />
-              </div>
+            <Card 
+              className="p-2 h-100 shadow-sm hover-card"
+              onDoubleClick={() => handleOpenProject(project)}
+            >
+              {project.defaultImage ? (
+                <div
+                  style={{
+                    height: 140,
+                    borderRadius: "10px 10px 0 0",
+                    backgroundImage: `url(${project.defaultImage})`,
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                  }}
+                />
+              ) : (
+                <div
+                  className="d-flex align-items-center justify-content-center"
+                  style={{
+                    height: 140,
+                    borderRadius: "10px 10px 0 0",
+                    background: themeColors.toolbarBg,
+                  }}
+                >
+                  <FolderOpen size={28} />
+                </div>
+              )}
 
               <Card.Body>
                 <h5 className="mb-1">{project.name}</h5>
@@ -412,20 +469,6 @@ export default function Projects() {
                   </div>
 
                   <div>
-                    {/* OPEN PROJECT (with rebuild) */}
-                    <OverlayTrigger
-                      placement="top"
-                      overlay={<Tooltip>Open Project</Tooltip>}
-                    >
-                      <Button
-                        size="sm"
-                        variant="outline-primary"
-                        onClick={() => handleOpenProject(project)}
-                      >
-                        Open
-                      </Button>
-                    </OverlayTrigger>
-
                     {/* PERMISSION */}
                     <OverlayTrigger
                       placement="top"
@@ -490,6 +533,30 @@ export default function Projects() {
                   })
                 }
               />
+            </Form.Group>
+
+            <Form.Group className="mt-3">
+              <Form.Label>Cover Image (Optional)</Form.Label>
+              <Form.Control
+                type="file"
+                accept="image/*"
+                onChange={async (e) => {
+                  const file = e.target.files[0];
+                  if (file) {
+                    try {
+                      const base64 = await resizeImageFile(file);
+                      setCurrentProject({ ...currentProject, coverImage: base64 });
+                    } catch (err) {
+                      console.error("Failed to resize image", err);
+                    }
+                  }
+                }}
+              />
+              {currentProject?.coverImage && (
+                <div className="mt-2">
+                   <img src={currentProject.coverImage} style={{ height: 60, borderRadius: 5, objectFit: "cover" }} alt="cover preview" />
+                </div>
+              )}
             </Form.Group>
 
             <Form.Group className="mt-3">

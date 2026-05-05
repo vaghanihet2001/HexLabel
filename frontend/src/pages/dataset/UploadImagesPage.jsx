@@ -308,7 +308,7 @@ export default function UploadImagesPage({ dataset, project, onJobCreated }) {
         await mw.write(JSON.stringify(imageMeta, null, 2));
         await mw.close();
 
-        await db.images.put({ ...imageMeta, jobId: jobId });
+        await db.images.put({ ...imageMeta, jobId: jobId, url: tempImg.url });
         imageIds.push(tempImg.id);
       }
 
