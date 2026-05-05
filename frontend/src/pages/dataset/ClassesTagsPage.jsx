@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   Button, Form, InputGroup, Badge, Modal, ProgressBar, Spinner, Tab, Tabs,
 } from "react-bootstrap";
@@ -25,6 +25,20 @@ const colorForName = (name) => {
 export default function ClassesTagsPage() {
   const { projectId, datasetId } = useParams();
   const { themeColors } = useTheme();
+  
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState(() => {
+    return searchParams.get("subtab") || localStorage.getItem("hexlabel-class-subtab") || "classes";
+  });
+
+  const handleSelectTab = (k) => {
+    setActiveTab(k);
+    localStorage.setItem("hexlabel-class-subtab", k);
+    setSearchParams((prev) => {
+      prev.set("subtab", k);
+      return prev;
+    }, { replace: true });
+  };
 
   const [dataset, setDataset] = useState(null);
   const [project, setProject] = useState(null);
@@ -111,7 +125,11 @@ export default function ClassesTagsPage() {
   // -----------------------------------------------------------------------
   const addNewClass = async () => {
     const name = newClassName.trim();
-    if (!name || classes.some(c => c.name === name)) return;
+    if (!name) return;
+    if (classes.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+      openModal({ type: "error", title: "Duplicate", message: `A class named "${name}" already exists.` });
+      return;
+    }
     const cls = { id: uid(), name, color: newClassColor || colorForName(name) };
     await saveClasses([...classes, cls]);
     setNewClassName("");
@@ -127,6 +145,10 @@ export default function ClassesTagsPage() {
   const commitEditClass = async () => {
     const name = editValue.trim();
     if (!name) { cancelEdit(); return; }
+    if (classes.some(c => c.id !== editingId && c.name.toLowerCase() === name.toLowerCase())) {
+      openModal({ type: "error", title: "Duplicate", message: `A class named "${name}" already exists.` });
+      return;
+    }
     await saveClasses(classes.map(c => c.id === editingId ? { ...c, name, color: editColor } : c));
     cancelEdit();
   };
@@ -134,6 +156,10 @@ export default function ClassesTagsPage() {
   const commitEditTag = async () => {
     const name = editValue.trim();
     if (!name) { cancelEdit(); return; }
+    if (tags.some(t => t.id !== editingId && t.name.toLowerCase() === name.toLowerCase())) {
+      openModal({ type: "error", title: "Duplicate", message: `A tag named "${name}" already exists.` });
+      return;
+    }
     await saveTags(tags.map(t => t.id === editingId ? { ...t, name, color: editColor } : t));
     cancelEdit();
   };
@@ -219,7 +245,11 @@ export default function ClassesTagsPage() {
   // -----------------------------------------------------------------------
   const addNewTag = async () => {
     const name = newTagName.trim();
-    if (!name || tags.some(t => t.name === name)) return;
+    if (!name) return;
+    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+      openModal({ type: "error", title: "Duplicate", message: `A tag named "${name}" already exists.` });
+      return;
+    }
     const tag = { id: uid(), name, color: newTagColor || colorForName(name) };
     await saveTags([...tags, tag]);
     setNewTagName("");
@@ -300,7 +330,8 @@ export default function ClassesTagsPage() {
       )}
 
       <Tabs 
-        defaultActiveKey="classes" 
+        activeKey={activeTab}
+        onSelect={handleSelectTab}
         className="custom-hex-tabs mb-3"
         style={{ borderBottom: `1px solid ${themeColors?.border}` }}
       >

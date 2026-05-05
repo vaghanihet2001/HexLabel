@@ -1,7 +1,7 @@
 // frontend/src/pages/DatasetPage.jsx
 import React, { useState, useEffect } from "react";
 import { Tabs, Tab, Button } from "react-bootstrap";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useTheme } from "../components/ThemeContext";
 
 import UploadImagesPage from "./dataset/UploadImagesPage";
@@ -18,8 +18,21 @@ export default function DatasetPage() {
   const navigate = useNavigate();
   const { themeColors } = useTheme();
 
-  const [activeTab, setActiveTab] = useState("upload");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState(() => {
+    return searchParams.get("tab") || localStorage.getItem("hexlabel-dataset-tab") || "upload";
+  });
   const [jobRefresh, setJobRefresh] = useState(0);
+
+  // Sync tab state to URL and LocalStorage
+  const handleSelectTab = (k) => {
+    setActiveTab(k);
+    localStorage.setItem("hexlabel-dataset-tab", k);
+    setSearchParams((prev) => {
+      prev.set("tab", k);
+      return prev;
+    }, { replace: true });
+  };
 
   const [project, setProject] = useState(null);
   const [dataset, setDataset] = useState(null);
@@ -42,7 +55,7 @@ export default function DatasetPage() {
   // JOB CREATED → SWITCH TO JOB TAB
   // --------------------------------------------
   const handleJobCreated = () => {
-    setActiveTab("jobs");
+    handleSelectTab("jobs");
     setJobRefresh((p) => p + 1);
   };
 
@@ -106,7 +119,7 @@ export default function DatasetPage() {
         {/* TAB BAR */}
         <Tabs
           activeKey={activeTab}
-          onSelect={(k) => setActiveTab(k)}
+          onSelect={handleSelectTab}
           justify
           className="custom-hex-tabs"
           style={{

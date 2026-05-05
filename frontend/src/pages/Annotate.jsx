@@ -1608,7 +1608,8 @@ export default function Annotate() {
   const addClass = async () => {
     const name = newClassName.trim();
     if (!name) return;
-    if (classes.some((c) => c.name === name)) {
+    if (classes.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      openModal({ type: "error", title: "Duplicate", message: `A class named "${name}" already exists.` });
       setNewClassName("");
       return;
     }
