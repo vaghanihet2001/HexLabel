@@ -50,12 +50,26 @@ HexLabel/
 
 ✅ Fast, responsive annotation workspace
 
-🔜 Export annotations in multiple formats
+✅ **Supported Import Formats:**
+   - YOLO Bounding Box (HBB)
+   - YOLO Segmentation
+   - YOLO Classification
+   - YOLO Oriented Bounding Box (OBB)
 
-🔜 User & project management dashboard
+✅ **Supported Export Formats:**
+   - YOLO Bounding Box (HBB)
+   - YOLO Segmentation
+   - YOLO Classification
+   - *(YOLO OBB export is coming soon)*
+
+🔜 project management dashboard
 
 ## 🧑‍💻 Author
 
 ### Vaghani Het
 
 📫 <a href="https://github.com/vaghanihet2001">GitHub Profile</a>
+
+## 📝 License
+
+This project is open-source and available under the [GNU General Public License v3.0 (GPL-3.0)](LICENSE).

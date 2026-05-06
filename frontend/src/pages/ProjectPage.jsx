@@ -16,6 +16,7 @@ import { resizeImageFile } from "../utils/imageUtils";
 import AppModal from "../components/AppModal";
 import { db, generateId } from "../utils/db";
 import * as fsUtils from "../utils/fs";
+import { importDataset, IMPORT_FORMATS } from "../utils/importUtils";
 
 export default function ProjectPage() {
   const { projectId } = useParams();
@@ -58,6 +59,14 @@ export default function ProjectPage() {
   const [newDatasetDescription, setNewDatasetDescription] = useState("");
   const [newDatasetCover, setNewDatasetCover] = useState(null);
   const [hasPermission, setHasPermission] = useState(true);
+
+  // Import dataset state
+  const [showImport, setShowImport] = useState(false);
+  const [importName, setImportName] = useState("");
+  const [importType, setImportType] = useState("yolo-hbb");
+  const [importDirHandle, setImportDirHandle] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(null);
 
   // Helper to fetch datasets and inject fallback images
   const fetchDatasetsWithImages = async (pid) => {
@@ -284,6 +293,69 @@ export default function ProjectPage() {
     }
   };
 
+  // handle import dataset
+  const handleImportDataset = async () => {
+    if (!importName.trim()) {
+      return openModal({ type: "error", title: "Name Required", message: "Enter a dataset name." });
+    }
+    if (!importDirHandle) {
+      return openModal({ type: "error", title: "Folder Required", message: "Please select a dataset folder to import." });
+    }
+    if (!project?.folderHandle) {
+      return openModal({ type: "error", title: "Missing Folder", message: "Project folder missing." });
+    }
+
+    let perm = await project.folderHandle.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted") perm = await project.folderHandle.requestPermission({ mode: "readwrite" });
+    if (perm !== "granted") {
+      setHasPermission(false);
+      return openModal({ type: "error", title: "Permission Required", message: "Write permission required to create dataset." });
+    }
+
+    setIsImporting(true);
+    setImportProgress({ stage: "Starting import...", current: 0, total: 100 });
+
+    try {
+      const datasetMeta = {
+        id: generateId(),
+        name: importName,
+        description: `Imported from folder: ${importDirHandle.name}`,
+        projectId: projectId,
+        createdAt: new Date().toISOString(),
+        annotationVersions: [],
+      };
+
+      await importDataset(
+        project.folderHandle, 
+        importDirHandle, 
+        datasetMeta, 
+        importType, 
+        (prog) => setImportProgress(prog)
+      );
+
+      setDatasets(await fetchDatasetsWithImages(projectId));
+      openModal({
+        type: "success",
+        title: "Dataset Imported",
+        message: `"${importName}" imported successfully.`,
+        autoClose: true
+      });
+      setShowImport(false);
+      setImportName("");
+      setImportDirHandle(null);
+    } catch (err) {
+      console.error("Failed to import dataset:", err);
+      openModal({
+        type: "error",
+        title: "Import Failed",
+        message: err.message || "Could not import dataset. Check file structure and permissions."
+      });
+    } finally {
+      setIsImporting(false);
+      setImportProgress(null);
+    }
+  };
+
   // delete dataset
   const openDeleteDatasetModal = (dataset) => {
     openModal({
@@ -357,7 +429,12 @@ export default function ProjectPage() {
         </div>
 
         {hasPermission ? (
-          <Button variant="primary" onClick={openAddModal}><Plus size={16} className="me-1" /> Add Dataset</Button>
+          <div>
+            <Button variant="primary" onClick={openAddModal} className="me-2"><Plus size={16} className="me-1" /> Add Dataset</Button>
+            <Button variant="outline-primary" onClick={() => { setImportName(""); setImportDirHandle(null); setImportType("yolo-hbb"); setShowImport(true); }}>
+              <FolderOpen size={16} className="me-1" /> Import Dataset
+            </Button>
+          </div>
         ) : (
           <Button variant="warning" onClick={handleGrantPermission}><Lock size={16} className="me-1" /> Grant Folder Access</Button>
         )}
@@ -462,11 +539,71 @@ export default function ProjectPage() {
                 <Form.Select value={newDatasetType} onChange={(e) => setNewDatasetType(e.target.value)} disabled={!!editDatasetId}>
                   <option value="detect">Detection</option>
                   <option value="segment">Segmentation</option>
-                  <option value="obb">OBB</option>
                   <option value="classify">Classification</option>
-                  <option value="ocr">OCR</option>
                 </Form.Select>
               </Form.Group>
+            </div>
+          }
+        />
+      )}
+
+      {/* Import Dataset modal */}
+      {showImport && (
+        <AppModal
+          show={showImport}
+          onClose={() => !isImporting && setShowImport(false)}
+          title="Import Dataset"
+          type="confirm"
+          confirmText="Import"
+          cancelText="Cancel"
+          onConfirm={handleImportDataset}
+          autoClose={false}
+          confirmDisabled={isImporting}
+          message={
+            <div>
+              {isImporting ? (
+                <div className="text-center py-4">
+                  <h5>{importProgress?.stage || "Importing..."}</h5>
+                  <p>{importProgress?.current} / {importProgress?.total}</p>
+                </div>
+              ) : (
+                <>
+                  <Form.Group className="mb-2">
+                    <Form.Label>Dataset Name</Form.Label>
+                    <Form.Control value={importName} onChange={(e) => setImportName(e.target.value)} placeholder="e.g. My YOLO Data" />
+                  </Form.Group>
+
+                  <Form.Group className="mb-2">
+                    <Form.Label>Format</Form.Label>
+                    <Form.Select value={importType} onChange={(e) => setImportType(e.target.value)}>
+                      {IMPORT_FORMATS.map(f => (
+                        <option key={f.value} value={f.value}>{f.label}</option>
+                      ))}
+                    </Form.Select>
+                  </Form.Group>
+
+                  <Form.Group className="mb-2">
+                    <Form.Label>Dataset Folder</Form.Label>
+                    <div className="d-flex gap-2 align-items-center">
+                      <Button variant="outline-secondary" onClick={async () => {
+                        try {
+                          const dirHandle = await window.showDirectoryPicker();
+                          setImportDirHandle(dirHandle);
+                          if (!importName) setImportName(dirHandle.name);
+                        } catch (e) {}
+                      }}>
+                        Select Folder
+                      </Button>
+                      <span className="text-truncate" style={{ maxWidth: "200px", color: themeColors.subtleText }}>
+                        {importDirHandle ? importDirHandle.name : "No folder selected"}
+                      </span>
+                    </div>
+                    <Form.Text className="d-block mt-2" style={{ color: themeColors.subtleText }}>
+                      Select a folder containing your dataset (e.g., images/ and labels/ subdirectories, or a flat list of images and annotations).
+                    </Form.Text>
+                  </Form.Group>
+                </>
+              )}
             </div>
           }
         />

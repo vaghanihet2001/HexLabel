@@ -430,7 +430,7 @@ export default function Projects() {
 
               <Card.Body>
                 <h5 className="mb-1">{project.name}</h5>
-                <p className="text-muted" style={{ minHeight: 40 }}>
+                <p style={{ minHeight: 40, color: themeColors.subtleText }}>
                   {project.description}
                 </p>
 
