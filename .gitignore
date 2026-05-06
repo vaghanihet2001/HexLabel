@@ -1,5 +1,7 @@
 node_modules/
 install.sh
 dist/
-.DS_Store/
-/.DS_Store
+# OS Files
+.DS_Store
+**/.DS_Store
+.env

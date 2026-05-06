@@ -191,15 +191,17 @@ const Header = () => {
                   {user.email}
                 </p>
 
-                <button
-                  className="btn btn-danger btn-sm w-100"
-                  onClick={() => {
-                    logout();
-                    setUserMenuOpen(false);
-                  }}
-                >
-                  Sign Out
-                </button>
+                {import.meta.env.VITE_ENABLE_AUTH === "true" && (
+                  <button
+                    className="btn btn-danger btn-sm w-100"
+                    onClick={() => {
+                      logout();
+                      setUserMenuOpen(false);
+                    }}
+                  >
+                    Sign Out
+                  </button>
+                )}
               </div>
             </div>
           )}

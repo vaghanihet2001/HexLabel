@@ -18,17 +18,34 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // ✅ Enable/Disable Auth from .env
+  const ENABLE_AUTH = import.meta.env.VITE_ENABLE_AUTH === "true";
+
   // Watch for auth state changes
   useEffect(() => {
+    if (!ENABLE_AUTH) {
+      // Mock user for offline mode
+      setUser({
+        uid: "offline-user",
+        displayName: "Offline User",
+        email: "offline@hexlabel.local",
+        photoURL: null,
+        isOffline: true
+      });
+      setLoading(false);
+      return;
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [ENABLE_AUTH]);
 
   // ✅ Signup with Email & Password
   const signup = async (email, password, displayName) => {
+    if (!ENABLE_AUTH) return;
     try {
       setError("");
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -41,6 +58,7 @@ export const AuthProvider = ({ children }) => {
 
   // ✅ Login with Email & Password
   const login = async (email, password) => {
+    if (!ENABLE_AUTH) return;
     try {
       setError("");
       await signInWithEmailAndPassword(auth, email, password);
@@ -51,6 +69,7 @@ export const AuthProvider = ({ children }) => {
 
   // ✅ Login with Google
   const loginWithGoogle = async () => {
+    if (!ENABLE_AUTH) return;
     try {
       setError("");
       const provider = new GoogleAuthProvider();
@@ -64,6 +83,7 @@ export const AuthProvider = ({ children }) => {
 
   // ✅ Password Reset
   const resetPassword = async (email) => {
+    if (!ENABLE_AUTH) return;
     try {
       setError("");
       await sendPasswordResetEmail(auth, email);
@@ -74,6 +94,10 @@ export const AuthProvider = ({ children }) => {
 
   // ✅ Logout
   const logout = async () => {
+    if (!ENABLE_AUTH) {
+      setUser(null);
+      return;
+    }
     try {
       await signOut(auth);
     } catch (err) {
@@ -92,6 +116,7 @@ export const AuthProvider = ({ children }) => {
         loginWithGoogle, // ✅ Added Google login here
         resetPassword,
         logout,
+        ENABLE_AUTH,
       }}
     >
       {!loading && children}
