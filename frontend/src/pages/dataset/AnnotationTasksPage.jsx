@@ -364,6 +364,7 @@ export default function AnnotationTasksPage({ project, dataset, jobRefresh }) {
       style={{
         padding: "1rem",
         background: themeColors.background,
+        minHeight: "100%"
       }}
     >
       <AppModal {...modal} show={modal.show} onClose={closeModal} />

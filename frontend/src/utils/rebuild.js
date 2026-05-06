@@ -117,17 +117,15 @@ async function rebuildImages(datasetFolder, datasetId) {
     for await (const entry of rawFolder.values()) {
       if (entry.kind !== "file") continue;
 
-      const file = await entry.getFile();
-
       await db.images.put({
         id: entry.name.includes(".") ? entry.name.substring(0, entry.name.lastIndexOf('.')) : entry.name, // Extract base safely
         datasetId,
         name: entry.name,
-        originalName: file.name,
+        originalName: entry.name,
         path: `images/raw/${entry.name}`,
         createdAt: new Date().toISOString(),
         jobId: null, // updated later
-        url: URL.createObjectURL(file),
+        url: null, // Blobs expire on refresh anyway, so we let LazyThumbnail generate this!
       });
     }
 

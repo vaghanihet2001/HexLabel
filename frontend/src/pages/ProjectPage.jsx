@@ -9,6 +9,7 @@ import {
   OverlayTrigger,
   Tooltip,
   Form,
+  Spinner,
 } from "react-bootstrap";
 import { Database, FolderOpen, Plus, Trash2, Lock, Edit } from "lucide-react";
 import { useTheme } from "../components/ThemeContext";
@@ -25,6 +26,7 @@ export default function ProjectPage() {
 
   const [project, setProject] = useState(null);
   const [datasets, setDatasets] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   // modal state for global app modal
   const [modal, setModal] = useState({
@@ -82,8 +84,14 @@ export default function ProjectPage() {
             } else if (ds.folderHandle) {
               try {
                 const imagesDir = await ds.folderHandle.getDirectoryHandle("images");
-                const rawDir = await imagesDir.getDirectoryHandle("raw");
-                const fh = await rawDir.getFileHandle(firstImg.name);
+                let fh = null;
+                try {
+                  const thumbsDir = await imagesDir.getDirectoryHandle("thumbs");
+                  fh = await thumbsDir.getFileHandle(firstImg.name);
+                } catch {
+                  const rawDir = await imagesDir.getDirectoryHandle("raw");
+                  fh = await rawDir.getFileHandle(firstImg.name);
+                }
                 const file = await fh.getFile();
                 defaultImage = URL.createObjectURL(file);
               } catch (e) {}
@@ -98,9 +106,11 @@ export default function ProjectPage() {
   // load project and datasets (from DB or disk)
   useEffect(() => {
     const load = async () => {
+      setLoading(true);
       const proj = await db.projects.get(projectId);
       if (!proj) {
         setProject(null);
+        setLoading(false);
         return;
       }
       setProject(proj);
@@ -122,6 +132,7 @@ export default function ProjectPage() {
       }
 
       setDatasets(await fetchDatasetsWithImages(projectId));
+      setLoading(false);
     };
     load();
   }, [projectId]);
@@ -403,6 +414,15 @@ export default function ProjectPage() {
       autoClose: true,
     });
   };
+
+  // Add loading spinner
+  if (loading) {
+    return (
+      <div style={{ height: "80vh", display: "flex", justifyContent: "center", alignItems: "center" }}>
+        <Spinner animation="border" style={{ color: themeColors.primary }} />
+      </div>
+    );
+  }
 
   if (!project) return <div className="p-4" style={{ color: themeColors.text }}>Project not found.</div>;
 

@@ -34,6 +34,7 @@ import {
 import { db } from "../utils/db";
 import { useTheme } from "../components/ThemeContext";
 import AppModal from "../components/AppModal";
+import LazyThumbnail from "../components/LazyThumbnail";
 
 import {
   readDatasetMetadata,
@@ -78,6 +79,13 @@ export default function Annotate() {
   const [images, setImages] = useState([]); // {id,name,url,...}
   const [currentIdx, setCurrentIdx] = useState(0);
   const [loading, setLoading] = useState(true);
+
+  // Pagination & Lazy Loading state
+  const [rawDirHandle, setRawDirHandle] = useState(null);
+  const [thumbsDirHandle, setThumbsDirHandle] = useState(null);
+  const [currentImageUrl, setCurrentImageUrl] = useState(null);
+  const [sidebarPage, setSidebarPage] = useState(1);
+  const SIDEBAR_ITEMS_PER_PAGE = 20;
 
   // UI / tool state
   const [tool, setTool] = useState("bbox"); // 'bbox' | 'poly'
@@ -393,20 +401,21 @@ export default function Annotate() {
           const imageNamesMap = jb?.imageNames ?? {}; // legacy fallback map
 
           let imagesDir, rawDir;
+          const rawFileNames = new Set();
           try {
             imagesDir = await dsFolder.getDirectoryHandle("images");
             rawDir = await imagesDir.getDirectoryHandle("raw");
+            for await (const entry of rawDir.values()) {
+              rawFileNames.add(entry.name);
+            }
           } catch { /* no images folder at all */ }
 
           const tryOpenFile = async (filename) => {
             if (!rawDir) return null;
-            try {
-              const fh = await rawDir.getFileHandle(filename);
-              const file = await fh.getFile();
-              const url = URL.createObjectURL(file);
-              createdUrlsRef.current.add(url);
-              return { file, url, filename };
-            } catch { return null; }
+            if (rawFileNames.has(filename)) {
+              return { filename };
+            }
+            return null;
           };
 
           for (const missingId of missingIds) {
@@ -427,7 +436,6 @@ export default function Annotate() {
                       jobId: jb?.id ?? null,
                       tagIds: [],
                       createdAt: new Date().toISOString(),
-                      url: opened.url,
                     };
                   }
                 }
@@ -442,7 +450,7 @@ export default function Annotate() {
                 if (meta?.name) {
                   const opened = await tryOpenFile(meta.name);
                   if (opened) {
-                    recovered = { ...meta, datasetId: dsId, url: opened.url, _hasMeta: true };
+                    recovered = { ...meta, datasetId: dsId, _hasMeta: true };
                   }
                 }
               } catch { /* no meta file */ }
@@ -462,7 +470,6 @@ export default function Annotate() {
                     jobId: jb?.id ?? null,
                     tagIds: [],
                     createdAt: new Date().toISOString(),
-                    url: opened.url,
                   };
                   break;
                 }
@@ -512,27 +519,19 @@ export default function Annotate() {
             resolved.push(img);
             continue;
           }
-          let url = null;
-          try {
-            if (dsFolder) {
-              try {
-                const imagesDir = await dsFolder.getDirectoryHandle("images");
-                const rawDir = await imagesDir.getDirectoryHandle("raw");
-                const fh = await rawDir.getFileHandle(img.name);
-                const file = await fh.getFile();
-                url = URL.createObjectURL(file);
-                createdUrlsRef.current.add(url);
-              } catch { /* fallback to stored blob / url */ }
-            }
-            if (!url && img.file instanceof Blob) {
-              url = URL.createObjectURL(img.file);
-              createdUrlsRef.current.add(url);
-            }
-            if (!url && img.url) url = img.url;
-          } catch (e) {
-            console.warn("Failed to create url for image", img.name, e);
+          
+          // DO NOT generate Blob URLs synchronously for thousands of files.
+          // Wait for LazyThumbnail (sidebar) or loadForImage (main canvas) to request it.
+          if (dsFolder) {
+            try {
+              const imagesDir = await dsFolder.getDirectoryHandle("images");
+              const rawDir = await imagesDir.getDirectoryHandle("raw");
+              setRawDirHandle(rawDir); // save for later lazy loads
+              const thumbsDir = await imagesDir.getDirectoryHandle("thumbs", { create: true });
+              setThumbsDirHandle(thumbsDir);
+            } catch { /* fallback */ }
           }
-          resolved.push({ ...img, url });
+          resolved.push(img);
         }
 
         if (!mounted) return;
@@ -606,7 +605,38 @@ export default function Annotate() {
       const img = images[currentIdx];
       if (!img) {
         setAnnotations([]);
+        setCurrentImageUrl(null);
         return;
+      }
+
+      // Sync sidebar pagination so active image is always visible
+      const activePage = Math.floor(currentIdx / SIDEBAR_ITEMS_PER_PAGE) + 1;
+      if (activePage !== sidebarPage) {
+        setSidebarPage(activePage);
+      }
+
+      // Scroll the active thumbnail into view
+      setTimeout(() => {
+        const activeEl = document.getElementById("active-thumbnail");
+        if (activeEl) {
+          activeEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      }, 50);
+
+      // Load main image URL dynamically
+      if (img.url && !img.url.startsWith("blob:")) {
+        setCurrentImageUrl(img.url);
+      } else if (rawDirHandle) {
+        try {
+          const fh = await rawDirHandle.getFileHandle(img.name);
+          const file = await fh.getFile();
+          const objUrl = URL.createObjectURL(file);
+          setCurrentImageUrl(objUrl);
+        } catch {
+          setCurrentImageUrl(null);
+        }
+      } else {
+        setCurrentImageUrl(null);
       }
 
       // Cancel any pending autosave from the previous image before we start
@@ -689,7 +719,17 @@ export default function Annotate() {
     };
 
     loadForImage();
-  }, [images, currentIdx, dsId, dataset, project]);
+
+    // Revoke object URL on unmount or when image changes
+    return () => {
+      setCurrentImageUrl((prevUrl) => {
+        if (prevUrl && !images[currentIdx]?.url) {
+          URL.revokeObjectURL(prevUrl);
+        }
+        return null;
+      });
+    };
+  }, [images, currentIdx, dsId, dataset, project, rawDirHandle]);
 
   /* -----------------------------
      AUTOSAVE (debounced) — writes DB + filesystem
@@ -1819,6 +1859,7 @@ export default function Annotate() {
         flexDirection: "column",
         background: themeColors.background,
         color: themeColors.text,
+        overflow: "hidden"
       }}
     >
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
@@ -1995,44 +2036,66 @@ export default function Annotate() {
                 borderRight: `1px solid ${themeColors.border}`,
                 background: themeColors.sidebarBg,
                 padding: 8,
-                overflowY: "auto",
                 transition: "width 0.2s",
                 position: "relative",
+                display: "flex",
+                flexDirection: "column"
               }}
             >
-              <div className="d-flex justify-content-between align-items-center mb-2">
+              <div className="d-flex justify-content-between align-items-center mb-2" style={{ flexShrink: 0 }}>
                 <b>Images</b>
                 <Badge bg="secondary">{images.length}</Badge>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                {images.map((img, i) => (
-                  <div
-                    key={img.id}
-                    onClick={() => setCurrentIdx(i)}
-                    style={{
-                      cursor: "pointer",
-                      border: i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
-                      borderRadius: 6,
-                      overflow: "hidden",
-                    }}
-                  >
-                    {img.url ? (
-                      <img
-                        src={img.url}
-                        alt={img.name}
-                        style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }}
-                        onError={(e) => {
-                          console.warn("Thumbnail failed to load in sidebar:", img.url);
-                        }}
-                      />
-                    ) : (
-                      <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: themeColors.subtleText }}>
-                        <ImageIcon />
-                      </div>
-                    )}
-                  </div>
-                ))}
+              <div style={{ flex: 1, overflowY: "auto", paddingBottom: 8, paddingRight: 4 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {images.slice((sidebarPage - 1) * SIDEBAR_ITEMS_PER_PAGE, sidebarPage * SIDEBAR_ITEMS_PER_PAGE).map((img, sliceIndex) => {
+                    const i = (sidebarPage - 1) * SIDEBAR_ITEMS_PER_PAGE + sliceIndex;
+                    return (
+                    <div
+                      id={i === currentIdx ? "active-thumbnail" : undefined}
+                      key={img.id}
+                      onClick={() => setCurrentIdx(i)}
+                      style={{
+                        cursor: "pointer",
+                        border: i === currentIdx ? `2px solid ${themeColors.accent ?? "#4f46e5"}` : `1px solid ${themeColors.border}`,
+                        borderRadius: 6,
+                        overflow: "hidden",
+                        aspectRatio: "1/1",
+                      }}
+                    >
+                      <LazyThumbnail img={img} rawDirHandle={rawDirHandle} thumbsDirHandle={thumbsDirHandle} />
+                    </div>
+                    );
+                  })}
+                </div>
               </div>
+
+              {/* Sidebar Pagination */}
+              {images.length > SIDEBAR_ITEMS_PER_PAGE && (
+                <div className="d-flex justify-content-between align-items-center mt-2 gap-2" style={{ flexShrink: 0, borderTop: `1px solid ${themeColors.border}`, paddingTop: 8 }}>
+                  <Button 
+                    variant="outline-secondary" 
+                    size="sm" 
+                    disabled={sidebarPage === 1}
+                    onClick={() => setSidebarPage(p => Math.max(1, p - 1))}
+                    style={{ padding: "2px 6px" }}
+                  >
+                    <ChevronLeft size={14} />
+                  </Button>
+                  <span style={{ fontSize: 12, color: themeColors.subtleText }}>
+                    {sidebarPage} / {Math.ceil(images.length / SIDEBAR_ITEMS_PER_PAGE)}
+                  </span>
+                  <Button 
+                    variant="outline-secondary" 
+                    size="sm" 
+                    disabled={sidebarPage === Math.ceil(images.length / SIDEBAR_ITEMS_PER_PAGE)}
+                    onClick={() => setSidebarPage(p => Math.min(Math.ceil(images.length / SIDEBAR_ITEMS_PER_PAGE), p + 1))}
+                    style={{ padding: "2px 6px" }}
+                  >
+                    <ChevronRight size={14} />
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2050,13 +2113,13 @@ export default function Annotate() {
           }}
           ref={containerRef}
         >
-          {currentImage?.url ? (
+          {currentImageUrl ? (
             <>
               <div className="annotation-stage" style={{ transition: "transform 0.05s linear" }}>
                   <img
                     ref={imageRef}
-                    src={currentImage.url}
-                    alt={currentImage.name}
+                    src={currentImageUrl}
+                    alt={currentImage?.name}
                     style={{
                     maxWidth: `100%`,
                     maxHeight: `85vh`,
@@ -2067,7 +2130,19 @@ export default function Annotate() {
                       userSelect: "none",
                     }}
                     onError={(e) => {
-                      console.warn(`Full image load failed in Annotate view for image: ${currentImage.name} (URL: ${currentImage.url})`);
+                      console.warn(`Full image load failed in Annotate view for image: ${currentImage?.name} (URL: ${currentImageUrl})`);
+                      // If it failed and we used a cached img.url (stale blob from db), fallback to rawDirHandle
+                      if (currentImageUrl === currentImage?.url && rawDirHandle) {
+                        (async () => {
+                          try {
+                            const fh = await rawDirHandle.getFileHandle(currentImage.name);
+                            const file = await fh.getFile();
+                            setCurrentImageUrl(URL.createObjectURL(file));
+                          } catch (err) {
+                            console.warn("Fallback load failed too", err);
+                          }
+                        })();
+                      }
                     }}
                     draggable={false}
                   />

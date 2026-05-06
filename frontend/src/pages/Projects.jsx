@@ -10,6 +10,7 @@ import {
   Form,
   OverlayTrigger,
   Tooltip,
+  Spinner,
 } from "react-bootstrap";
 
 import { useTheme } from "../components/ThemeContext";
@@ -346,15 +347,38 @@ export default function Projects() {
       });
     }
 
-    // ⭐ SAFE — RUN REBUILD BEFORE NAVIGATION
-    await rebuildDatabaseFromProject(project.folderHandle);
+    // Show loading spinner
+    setLoading(true);
+    // Yield to the browser so it can paint the spinner before the heavy rebuild
+    await new Promise(r => setTimeout(r, 100));
 
-    window.location.href = `/project/${project.id}`;
+    try {
+      // ⭐ SAFE — RUN REBUILD BEFORE NAVIGATION
+      await rebuildDatabaseFromProject(project.folderHandle);
+      window.location.href = `/project/${project.id}`;
+    } catch (e) {
+      console.error("Rebuild failed:", e);
+      setLoading(false);
+      openModal({
+        type: "error",
+        title: "Load Error",
+        message: "Failed to open project.",
+      });
+    }
   };
 
   // -----------------------------
   // UI
   // -----------------------------
+
+  if (loading) {
+    return (
+      <div style={{ height: "80vh", display: "flex", justifyContent: "center", alignItems: "center" }}>
+        <Spinner animation="border" style={{ color: themeColors.primary }} />
+      </div>
+    );
+  }
+
   return (
     <div className="p-4">
       <style>{`

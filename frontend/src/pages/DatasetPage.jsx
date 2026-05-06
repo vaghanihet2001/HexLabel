@@ -1,6 +1,6 @@
 // frontend/src/pages/DatasetPage.jsx
 import React, { useState, useEffect } from "react";
-import { Tabs, Tab, Button } from "react-bootstrap";
+import { Tabs, Tab, Button, Spinner } from "react-bootstrap";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useTheme } from "../components/ThemeContext";
 
@@ -64,8 +64,8 @@ export default function DatasetPage() {
   // --------------------------------------------
   if (!project || !dataset) {
     return (
-      <div className="p-4" style={{ color: themeColors.text }}>
-        Loading dataset...
+      <div style={{ height: "80vh", display: "flex", justifyContent: "center", alignItems: "center" }}>
+        <Spinner animation="border" style={{ color: themeColors.primary }} />
       </div>
     );
   }

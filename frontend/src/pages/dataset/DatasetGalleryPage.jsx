@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Card, Row, Col, Button, Form, Spinner, Dropdown, InputGroup, FormControl } from "react-bootstrap";
 import { useNavigate, useParams } from "react-router-dom";
-import { CheckSquare, Square, Tag, X } from "lucide-react";
+import { CheckSquare, Square, Tag, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { db } from "../../utils/db";
 import { useTheme } from "../../components/ThemeContext";
 import AppModal from "../../components/AppModal";
+import LazyThumbnail from "../../components/LazyThumbnail";
 import {
   readDatasetTags,
   readImageMeta,
@@ -28,6 +29,12 @@ export default function DatasetGalleryPage({ datasetId }) {
   const [selectedImages, setSelectedImages] = useState(new Set());
   const [searchQuery, setSearchQuery]     = useState("");
   const [loading, setLoading]             = useState(true);
+
+  // Pagination & Lazy Loading
+  const [rawDirHandle, setRawDirHandle]   = useState(null);
+  const [thumbsDirHandle, setThumbsDirHandle] = useState(null);
+  const [currentPage, setCurrentPage]     = useState(1);
+  const ITEMS_PER_PAGE = 50;
 
   // Tag picker popover: which imageId is open
   const [tagPickerOpen, setTagPickerOpen] = useState(null);
@@ -86,19 +93,27 @@ export default function DatasetGalleryPage({ datasetId }) {
         // If we sync a meta file whose raw image was deleted, the image will
         // ghost-resurrect in the gallery on next load.
         let rawDirHandle = null;
+        let thumbsDirHandle = null;
         if (dsFolder) {
           try {
             const imagesDir = await dsFolder.getDirectoryHandle("images");
             rawDirHandle = await imagesDir.getDirectoryHandle("raw");
+            thumbsDirHandle = await imagesDir.getDirectoryHandle("thumbs", { create: true });
           } catch { /* no images folder yet */ }
 
           if (rawDirHandle) {
             try {
+              // 1. Preload all file names from the raw directory for instant synchronous checks O(1)
+              const rawFileNames = new Set();
+              for await (const entry of rawDirHandle.values()) {
+                rawFileNames.add(entry.name);
+              }
+
               const fsMetas = await scanImageMetaFromDataset(dsFolder);
               for (const meta of fsMetas) {
                 // Verify raw file exists — if not, the image was deleted
-                try { await rawDirHandle.getFileHandle(meta.name); }
-                catch { continue; }
+                if (!rawFileNames.has(meta.name)) continue;
+                
                 const existing = await db.images.get(meta.id);
                 if (!existing) await db.images.put({ ...meta, datasetId });
               }
@@ -133,45 +148,41 @@ export default function DatasetGalleryPage({ datasetId }) {
           return true;
         });
 
+        // We will need the Set of file names again for validation
+        const finalRawFileNames = new Set();
+        if (rawDirHandle) {
+          for await (const entry of rawDirHandle.values()) {
+            finalRawFileNames.add(entry.name);
+          }
+        }
+
         const resolved = [];
         const tagsMap = {};
 
         for (const img of imgs) {
-          // NEVER use img.url as a fallback — blob: URLs from a previous page
-          // session are dead strings that pass !url checks but can't load images.
-          // Only accept a URL created live from a real FileSystemFileHandle.
-          let url = null;
+          // Just verify the file exists on disk to avoid rendering dead records.
+          let fileExists = false;
           if (rawDirHandle) {
-            try {
-              const fh = await rawDirHandle.getFileHandle(img.name);
-              const file = await fh.getFile();
-              url = URL.createObjectURL(file);
-              createdUrlsRef.current.add(url);
-            } catch { /* file not on disk */ }
+            fileExists = finalRawFileNames.has(img.name);
           }
 
-          if (!url) {
+          if (!fileExists && !img.url) {
             // Orphaned DB record — auto-clean so it won't reappear next load
             db.images.delete(img.id).catch(() => {});
             continue;
           }
 
-          // Load tagIds from meta file (or fallback to DB record)
-          let tagIds = img.tagIds ?? [];
-          if (dsFolder) {
-            try {
-              const meta = await readImageMeta(dsFolder, img.id);
-              if (meta?.tagIds) tagIds = meta.tagIds;
-            } catch { }
-          }
+          // tagIds are synced to DB in step 3 or during upload.
+          const tagIds = img.tagIds ?? [];
           tagsMap[img.id] = tagIds;
-
-          resolved.push({ ...img, url });
+          resolved.push(img);
         }
 
         if (!mounted) return;
         setImages(resolved);
         setImageTagsMap(tagsMap);
+        if (rawDirHandle) setRawDirHandle(rawDirHandle);
+        if (thumbsDirHandle) setThumbsDirHandle(thumbsDirHandle);
 
         // ── Step 5: Build per-image label map (imageId → Set<classId>) ────────
         // Primary: use db.annotations (populated when user annotates).
@@ -217,8 +228,6 @@ export default function DatasetGalleryPage({ datasetId }) {
     })();
 
     return () => {
-      createdUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
-      createdUrlsRef.current.clear();
       mounted = false;
     };
   }, [datasetId, projectId]);
@@ -301,6 +310,15 @@ export default function DatasetGalleryPage({ datasetId }) {
     return true;
   });
 
+  // Pagination calculation
+  const totalPages = Math.ceil(filteredImages.length / ITEMS_PER_PAGE);
+  const currentImages = filteredImages.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+
+  // Reset to page 1 if filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedClasses, selectedTags]);
+
   // -------------------------------------------------------------------------
   // Delete
   // -------------------------------------------------------------------------
@@ -370,11 +388,11 @@ export default function DatasetGalleryPage({ datasetId }) {
     );
 
   return (
-    <div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <AppModal {...modal} show={modal.show} onClose={closeModal} />
 
       {/* ---- Toolbar ---- */}
-      <div className="d-flex justify-content-start align-items-center mb-3 flex-wrap gap-2">
+      <div className="d-flex justify-content-start align-items-center mb-3 flex-wrap gap-2" style={{ flexShrink: 0 }}>
         <InputGroup style={{ maxWidth: 240 }}>
           <FormControl
             placeholder="Search by name…"
@@ -440,8 +458,8 @@ export default function DatasetGalleryPage({ datasetId }) {
       </div>
 
       {/* ---- Image Grid ---- */}
-      <Row xs={2} sm={3} md={4} lg={5} className="g-3">
-        {filteredImages.map((img) => {
+      <Row xs={2} sm={3} md={4} lg={5} className="g-3 m-0" style={{ flex: 1, overflowY: "auto", alignContent: "flex-start", paddingBottom: 16 }}>
+        {currentImages.map((img) => {
           const imgTags = imageTagsMap[img.id] ?? [];
           return (
             <Col key={img.id}>
@@ -479,9 +497,7 @@ export default function DatasetGalleryPage({ datasetId }) {
 
                 {/* Thumbnail */}
                 <div style={{ height: 120, overflow: "hidden", borderRadius: "10px 10px 0 0" }}>
-                  <img src={img.url} alt={img.originalName || img.name}
-                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                    onError={() => console.warn("Image failed to load:", img.name)} />
+                  <LazyThumbnail img={img} rawDirHandle={rawDirHandle} thumbsDirHandle={thumbsDirHandle} />
                 </div>
 
                 {/* Name */}
@@ -584,6 +600,31 @@ export default function DatasetGalleryPage({ datasetId }) {
           );
         })}
       </Row>
+
+      {/* ---- Pagination ---- */}
+      {totalPages > 1 && (
+        <div className="d-flex justify-content-center align-items-center py-2 gap-3" style={{ flexShrink: 0, borderTop: `1px solid ${tc.border}` }}>
+          <Button 
+            variant="outline-secondary" 
+            size="sm" 
+            disabled={currentPage === 1}
+            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+          >
+            <ChevronLeft size={16} /> Prev
+          </Button>
+          <span style={{ color: tc.text, fontSize: 14 }}>
+            Page {currentPage} of {totalPages}
+          </span>
+          <Button 
+            variant="outline-secondary" 
+            size="sm" 
+            disabled={currentPage === totalPages}
+            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+          >
+            Next <ChevronRight size={16} />
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

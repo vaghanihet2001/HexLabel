@@ -30,7 +30,7 @@ export default function App() {
           </div>
 
           <main
-            className="flex-grow-1  overflow-auto"
+            className="flex-grow-1"
             style={{
               backgroundColor: themeColors.background,
               borderLeft: "1px solid #333",
