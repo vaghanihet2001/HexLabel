@@ -109,6 +109,8 @@ export default function Annotate() {
   const canvasRef = useRef(null);
   const createdUrlsRef = useRef(new Set());
   const autosaveTimer = useRef(null);
+  const loadIdRef = useRef(0);
+  const lastNavTimeRef = useRef(0);
 
   // drawing/edit state (mutable ref to avoid re-render loops)
   const stateRef = useRef({
@@ -602,10 +604,18 @@ export default function Annotate() {
   // load annotations for current image (DB preferred, fallback to FS active)
   useEffect(() => {
     const loadForImage = async () => {
+      // 1. Synchronously update load ID and guard state
+      const myLoadId = ++loadIdRef.current;
+      isLoadingRef.current = true;
+
+      // 2. Clear current annotations immediately so we don't have stale data
+      // while the next image is loading.
+      setAnnotations([]);
+
       const img = images[currentIdx];
       if (!img) {
-        setAnnotations([]);
         setCurrentImageUrl(null);
+        isLoadingRef.current = false;
         return;
       }
 
@@ -630,10 +640,11 @@ export default function Annotate() {
         try {
           const fh = await rawDirHandle.getFileHandle(img.name);
           const file = await fh.getFile();
+          if (myLoadId !== loadIdRef.current) return;
           const objUrl = URL.createObjectURL(file);
           setCurrentImageUrl(objUrl);
         } catch {
-          setCurrentImageUrl(null);
+          if (myLoadId === loadIdRef.current) setCurrentImageUrl(null);
         }
       } else {
         setCurrentImageUrl(null);
@@ -646,8 +657,6 @@ export default function Annotate() {
         autosaveTimer.current = null;
       }
 
-      isLoadingRef.current = true;
-
       try {
         // First try DB (by imageId for reliability)
         const recById = await db.annotations
@@ -656,12 +665,16 @@ export default function Annotate() {
           .and((a) => a.imageId === img.id && !a.versionId)
           .first();
 
+        if (myLoadId !== loadIdRef.current) return;
+
         // Also try by imageName for backwards-compatibility
         const rec = recById || await db.annotations
           .where("datasetId")
           .equals(dsId)
           .and((a) => a.imageName === img.name && !a.versionId)
           .first();
+
+        if (myLoadId !== loadIdRef.current) return;
 
         let data = rec?.data ?? null;
 
@@ -671,12 +684,15 @@ export default function Annotate() {
             const dsFolder = dataset?.folderHandle || (project?.folderHandle ? await project.folderHandle.getDirectoryHandle(dataset.name).catch(() => null) : null);
             if (dsFolder) {
               const fileObj = await readAnnotationFile(dsFolder, img.id, null);
+              if (myLoadId !== loadIdRef.current) return;
               if (fileObj?.annotations?.length > 0) data = fileObj.annotations;
             }
           } catch (err) {
             // ignore
           }
         }
+
+        if (myLoadId !== loadIdRef.current) return;
 
         // normalize annotations: support both old (className) and new (classId) format
         const normalized = (data || []).map((a, index) => {
@@ -710,11 +726,17 @@ export default function Annotate() {
         setZoom(1);
       } catch (e) {
         console.warn("Failed to load annotations:", e);
-        setAnnotations([]);
+        if (myLoadId === loadIdRef.current) {
+          setAnnotations([]);
+        }
       } finally {
         // Allow autosave again after load settles
         // Small delay so React can flush setAnnotations before the guard is released
-        setTimeout(() => { isLoadingRef.current = false; }, 100);
+        setTimeout(() => {
+          if (myLoadId === loadIdRef.current) {
+            isLoadingRef.current = false;
+          }
+        }, 100);
       }
     };
 
@@ -1718,6 +1740,10 @@ export default function Annotate() {
   };
 
   const handleNextImage = () => {
+    const now = Date.now();
+    if (now - lastNavTimeRef.current < 300) return;
+    lastNavTimeRef.current = now;
+
     const isClassify = dataset?.type === "classify";
     const unlabelled = isClassify ? annotations.length === 0 : annotations.some((a) => !a.classId);
     if (unlabelled) {
@@ -1735,6 +1761,10 @@ export default function Annotate() {
   };
 
   const handlePrevImage = () => {
+    const now = Date.now();
+    if (now - lastNavTimeRef.current < 300) return;
+    lastNavTimeRef.current = now;
+
     if (currentIdx > 0) {
       setCurrentIdx((i) => Math.max(0, i - 1));
     }
